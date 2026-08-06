@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tercom-terrain-navigation"
+version = "0.3.0"
+description = "GNSS-denied terrain-profile navigation simulator"
+readme = "README.md"
+requires-python = ">=3.10,<3.14"
+dependencies = [
+    "matplotlib>=3.9",
+    "numpy>=1.26",
+    "PySide6>=6.8",
+    "rasterio>=1.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.9",
+]
+
+[project.scripts]
+tercom-terrain-nav = "run_terrain_nav:main"
+
+[tool.setuptools]
+py-modules = ["run_terrain_nav"]
+
+[tool.setuptools.packages.find]
+include = ["terrain_nav*"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
+ignore = ["E501"]

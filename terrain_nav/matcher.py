@@ -42,6 +42,43 @@ def pearson_corr(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.sum(a_m * b_m) / denom)
 
 
+def _inlier_quality_metrics(
+    error: np.ndarray,
+    measured_laser: np.ndarray,
+    expected_laser: np.ndarray,
+    trim_fraction: float,
+) -> Dict[str, float]:
+    valid_count = len(error)
+    if valid_count == 0:
+        return {
+            "inlier_rmse": float("inf"),
+            "inlier_mae": float("inf"),
+            "inlier_correlation": 0.0,
+            "inlier_ratio": 0.0,
+        }
+
+    bounded_trim = max(0.0, min(0.49, float(trim_fraction)))
+    trim_count = int(np.floor(valid_count * bounded_trim))
+    keep_count = max(1, valid_count - trim_count)
+
+    if keep_count < valid_count:
+        keep_indices = np.argsort(np.abs(error), kind="stable")[:keep_count]
+        inlier_error = error[keep_indices]
+        inlier_laser = measured_laser[keep_indices]
+        inlier_expected = expected_laser[keep_indices]
+    else:
+        inlier_error = error
+        inlier_laser = measured_laser
+        inlier_expected = expected_laser
+
+    return {
+        "inlier_rmse": float(np.sqrt(np.mean(inlier_error**2))),
+        "inlier_mae": float(np.mean(np.abs(inlier_error))),
+        "inlier_correlation": pearson_corr(inlier_laser, inlier_expected),
+        "inlier_ratio": float(keep_count) / valid_count,
+    }
+
+
 def evaluate_candidate(
     candidate_row: float,
     candidate_col: float,
@@ -117,6 +154,12 @@ def evaluate_candidate(
     if compute_all_metrics:
         median_abs_error = float(np.median(np.abs(error)))
         corr = pearson_corr(v_laser, expected_laser)
+        quality_metrics = _inlier_quality_metrics(
+            error,
+            v_laser,
+            expected_laser,
+            config.algorithm.quality_trim_fraction,
+        )
         diff_rmse = 0.0
         diff2_rmse = 0.0
         if valid_count > 1:
@@ -134,6 +177,7 @@ def evaluate_candidate(
             "median_abs_error": median_abs_error,
             "huber": huber,
             "correlation": corr,
+            **quality_metrics,
             "diff_rmse": diff_rmse,
             "diff2_rmse": diff2_rmse,
         }

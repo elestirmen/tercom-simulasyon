@@ -9,7 +9,7 @@ import numpy as np
 from terrain_nav.confidence import detect_ambiguity
 from terrain_nav.config import LocalizationConfig
 from terrain_nav.coordinates import CoordinateTransform
-from terrain_nav.matcher import ProfileMatcher
+from terrain_nav.matcher import Candidate, ProfileMatcher
 from terrain_nav.metrics import EstimatedState
 from terrain_nav.sensors import Measurement, SensorSimulator
 from terrain_nav.terrain import TerrainManager
@@ -33,16 +33,23 @@ class LocalizationEngine:
         self.last_match_pixel: Optional[Tuple[float, float]] = None
         self.base_search_roi_size = max(0, int(config.algorithm.search_roi_size_px))
         self.current_search_roi_size = self.base_search_roi_size
+        self.recovery_active = False
+        self.last_rejection_reason: Optional[str] = None
+        self.last_rejected_score: Optional[float] = None
 
     def add_measurement(self, m: Measurement):
         self.measurements.append(m)
 
         if len(self.measurements) > self.config.algorithm.profile_window_size:
-            removed = self.measurements.pop(0)
+            self.measurements.pop(0)
             if self.last_match_pixel is not None:
+                # Each measurement stores the motion that ended at that sample.
+                # After removing the oldest sample, advance the anchor with the
+                # motion attached to the new oldest sample.
+                new_oldest = self.measurements[0]
                 d_row, d_col = self.ct.offset_pixels(
-                    removed.traveled_distance_m,
-                    removed.sensor_heading_deg,
+                    new_oldest.traveled_distance_m,
+                    new_oldest.sensor_heading_deg,
                 )
                 self.last_match_pixel = (
                     self.last_match_pixel[0] + d_row,
@@ -59,14 +66,17 @@ class LocalizationEngine:
 
         curr_x, curr_y = 0.0, 0.0
 
-        for _i, m in enumerate(self.measurements):
-            # The heading is the heading the sensor reported for this step
-            self.relative_offsets.append((curr_x, curr_y, m.sensor_heading_deg))
-
-            # To get to the next point, move by traveled_distance in the direction of heading
-            dx, dy = self.ct.offset_meters(m.traveled_distance_m, m.sensor_heading_deg)
-            curr_x += dx
-            curr_y += dy
+        for index, measurement in enumerate(self.measurements):
+            # A measurement's odometry describes the movement from the previous
+            # sample into this sample. The first item anchors the profile at zero.
+            if index > 0:
+                dx, dy = self.ct.offset_meters(
+                    measurement.traveled_distance_m,
+                    measurement.sensor_heading_deg,
+                )
+                curr_x += dx
+                curr_y += dy
+            self.relative_offsets.append((curr_x, curr_y, measurement.sensor_heading_deg))
 
     def _search_bounds(self) -> Optional[Tuple[int, int, int, int]]:
         if self.last_match_pixel is None or self.current_search_roi_size <= 0:
@@ -96,36 +106,87 @@ class LocalizationEngine:
             int(round(self.current_search_roi_size * 1.5)),
         )
         self.current_search_roi_size = min(map_size, grown)
+        self.recovery_active = True
 
-    def reset_tracking(self) -> None:
-        """Discard a profile that cannot be matched in the loaded DEM window."""
-        self.measurements.clear()
-        self.relative_offsets.clear()
+    def _bounds_cover_full_map(self, bounds: Tuple[int, int, int, int]) -> bool:
+        rows, cols = self.nav_dem.shape
+        return bounds == (0, rows, 0, cols)
+
+    def _enter_global_recovery(self) -> None:
+        """Drop a stale anchor while retaining the measured terrain profile."""
         self.last_match_pixel = None
         self.current_search_roi_size = self.base_search_roi_size
+        self.recovery_active = True
+
+    def _reject_search_result(
+        self,
+        search_bounds: Optional[Tuple[int, int, int, int]],
+    ) -> None:
+        """Broaden a tracked search without converting a poor candidate into a fix."""
+        if search_bounds is not None:
+            if self._bounds_cover_full_map(search_bounds):
+                self._enter_global_recovery()
+            else:
+                self._grow_search_roi()
+        elif self.last_match_pixel is not None:
+            self._enter_global_recovery()
+
+    def _candidate_passes_quality_gate(self, candidate: Candidate) -> bool:
+        algorithm = self.config.algorithm
+        quality_score = self._candidate_quality_score(candidate)
+        correlation = self._candidate_quality_correlation(candidate)
+        return (
+            quality_score <= algorithm.max_match_inlier_rmse_m
+            and correlation >= algorithm.min_match_inlier_correlation
+            and candidate.valid_ratio >= algorithm.min_match_valid_ratio
+        )
+
+    @staticmethod
+    def _candidate_quality_score(candidate: Candidate) -> float:
+        metrics = candidate.metrics
+        return float(metrics.get("inlier_rmse", metrics.get("rmse", candidate.score)))
+
+    @staticmethod
+    def _candidate_quality_correlation(candidate: Candidate) -> float:
+        metrics = candidate.metrics
+        return float(metrics.get("inlier_correlation", metrics.get("correlation", 1.0)))
 
     def get_search_status(self) -> dict:
         """Expose the exact search area used for the next localization call."""
         rows, cols = self.nav_dem.shape
         local_bounds = self._search_bounds()
-        if local_bounds is None:
+        if local_bounds is None or self._bounds_cover_full_map(local_bounds):
+            if self.recovery_active:
+                phase = "recovery"
+            elif self.last_match_pixel is None:
+                phase = "initial"
+            else:
+                phase = "tracking"
             return {
-                "mode": "full_loaded_window",
+                "mode": "global_search",
+                "phase": phase,
                 "bounds": (0, rows, 0, cols),
                 "draw_bounds": None,
                 "has_anchor": self.last_match_pixel is not None,
                 "roi_size_px": max(rows, cols),
+                "rejection_reason": self.last_rejection_reason,
+                "rejected_score": self.last_rejected_score,
             }
         return {
             "mode": "local_roi",
+            "phase": "recovery" if self.recovery_active else "tracking",
             "bounds": local_bounds,
             "draw_bounds": local_bounds,
             "has_anchor": True,
             "roi_size_px": self.current_search_roi_size,
+            "rejection_reason": self.last_rejection_reason,
+            "rejected_score": self.last_rejected_score,
         }
 
     def localize(self, timestamp: float) -> Optional[EstimatedState]:
         if len(self.measurements) < self.config.algorithm.min_profile_length:
+            self.last_rejection_reason = "profile_incomplete"
+            self.last_rejected_score = None
             return None
 
         laser = np.array([m.laser_agl_m for m in self.measurements])
@@ -155,8 +216,9 @@ class LocalizationEngine:
         )
 
         if not cands:
-            if search_bounds is not None:
-                self._grow_search_roi()
+            self.last_rejection_reason = "no_candidates"
+            self.last_rejected_score = None
+            self._reject_search_result(search_bounds)
             return None
 
         max_jump_m = float(self.config.algorithm.max_match_jump_m)
@@ -172,12 +234,34 @@ class LocalizationEngine:
                 <= max_jump_m
             ]
             if not plausible_cands:
-                self._grow_search_roi()
+                self.last_rejection_reason = "continuity"
+                self.last_rejected_score = cands[0].score
+                self._reject_search_result(search_bounds)
                 return None
             cands = plausible_cands
 
-        is_ambiguous, margin, spread = detect_ambiguity(cands)
+        quality_cands = [
+            candidate for candidate in cands if self._candidate_passes_quality_gate(candidate)
+        ]
+        if not quality_cands:
+            self.last_rejection_reason = "quality"
+            self.last_rejected_score = self._candidate_quality_score(cands[0])
+            self._reject_search_result(search_bounds)
+            return None
+        cands = sorted(
+            quality_cands,
+            key=lambda candidate: (self._candidate_quality_score(candidate), candidate.score),
+        )
+
+        is_ambiguous, margin, spread = detect_ambiguity(
+            cands,
+            score_getter=self._candidate_quality_score,
+        )
         best = cands[0]
+        quality_score = self._candidate_quality_score(best)
+        quality_correlation = self._candidate_quality_correlation(best)
+        self.last_rejection_reason = None
+        self.last_rejected_score = None
         if search_bounds is not None:
             edge_margin = max(
                 int(self.config.algorithm.coarse_stride),
@@ -192,12 +276,14 @@ class LocalizationEngine:
             is_ambiguous = is_ambiguous or near_roi_edge
 
         if is_ambiguous:
-            if self.last_match_pixel is None:
-                self.last_match_pixel = (best.row, best.col)
-            self._grow_search_roi()
+            # Never turn an ambiguous global candidate into a local lock. When
+            # tracking an existing lock, broaden its ROI until global recovery.
+            if search_bounds is not None:
+                self._grow_search_roi()
         else:
             self.last_match_pixel = (best.row, best.col)
             self.current_search_roi_size = self.base_search_roi_size
+            self.recovery_active = False
 
         # `best.row`, `best.col` is the location of the *start* of the window (the oldest point).
         # We want the location of the *current* point (the newest point).
@@ -238,6 +324,8 @@ class LocalizationEngine:
             score=best.score,
             spatial_spread=spread,
             score_margin=margin,
+            quality_score=quality_score,
+            quality_correlation=quality_correlation,
         )
 
 
@@ -285,7 +373,6 @@ class SimulationEngine:
             self.terrain.get_navigation_dem(copy=False),
             self.ct,
         )
-        self.localization_coverage_active = True
 
         self.step_idx = 0
         self.dt_s = config.route.sample_spacing_m / config.route.speed_m_s
@@ -314,21 +401,16 @@ class SimulationEngine:
         """Turn the vehicle's heading by angle_deg."""
         self.dynamic_h = (self.dynamic_h + angle_deg) % 360.0
 
+    def close(self) -> None:
+        """Release external terrain resources owned by the simulation."""
+        self.terrain.close()
+
     def get_current_state(self) -> Tuple[float, float, float]:
         """Return the current truth state without taking a measurement."""
         return self.dynamic_x, self.dynamic_y, self.dynamic_h
 
     def get_localization_status(self) -> dict:
         """Return UI-safe localization search state without exposing truth."""
-        if not self.localization_coverage_active:
-            rows, cols = self.terrain.nav_dem.shape
-            return {
-                "mode": "outside_loaded_window",
-                "bounds": (0, rows, 0, cols),
-                "draw_bounds": None,
-                "has_anchor": False,
-                "roi_size_px": 0,
-            }
         return self.localization.get_search_status()
 
     def _validate_world_position(self, x: float, y: float) -> None:
@@ -357,20 +439,8 @@ class SimulationEngine:
             dt_s=dt_s,
         )
 
-        inside_localization_coverage = self.terrain.is_inside_navigation_window(
-            true_x,
-            true_y,
-        )
-        if inside_localization_coverage:
-            if not self.localization_coverage_active:
-                self.localization.reset_tracking()
-            self.localization_coverage_active = True
-            self.localization.add_measurement(m)
-            est = self.localization.localize(self.elapsed_s)
-        else:
-            self.localization.reset_tracking()
-            self.localization_coverage_active = False
-            est = None
+        self.localization.add_measurement(m)
+        est = self.localization.localize(self.elapsed_s)
         self.elapsed_s += dt_s
         self.step_idx += 1
 

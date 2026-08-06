@@ -108,44 +108,45 @@ class SimulationWorker(QThread):
         self._is_running = True
         self.stopped_by_user = False
         total = self.sim.get_total_steps()
-
-        if self.manual_control:
-            # Manual mode is event-driven. The route length is a benchmark
-            # hint, not a hard command limit; keep waiting for W/S/A/D/Q/E.
-            while self._is_running:
-                try:
-                    command, value = self._commands.get(timeout=0.1)
-                except Empty:
-                    continue
-
-                if command == "rotate":
-                    self.sim.turn_vehicle(value)
-                    self.state_changed.emit(self.sim.get_current_state())
-                    continue
-
-                if command == "move":
+        try:
+            if self.manual_control:
+                # Manual mode is event-driven. The route length is a benchmark
+                # hint, not a hard command limit; keep waiting for W/S/A/D/Q/E.
+                while self._is_running:
                     try:
-                        true_s, est_s, measurement = self.sim.execute_motion(
-                            self.config.route.manual_step_distance_m,
-                            value,
-                        )
-                    except MotionOutOfBoundsError as exc:
-                        self.command_rejected.emit(str(exc))
+                        command, value = self._commands.get(timeout=0.1)
+                    except Empty:
                         continue
-                    self.step_done.emit(self.sim.step_idx - 1, true_s, est_s, measurement)
 
-                # Keep a small pause so a burst of queued commands still lets
-                # the Qt event loop repaint telemetry and the map.
-                self.msleep(50)
-        else:
-            for i in range(total):
-                if not self._is_running:
-                    break
-                true_s, est_s, m = self.sim.step()
-                self.step_done.emit(i, true_s, est_s, m)
-                self.msleep(100)  # Sleep to allow UI to update and user to see
+                    if command == "rotate":
+                        self.sim.turn_vehicle(value)
+                        self.state_changed.emit(self.sim.get_current_state())
+                        continue
 
-        self.finished_sim.emit()
+                    if command == "move":
+                        try:
+                            true_s, est_s, measurement = self.sim.execute_motion(
+                                self.config.route.manual_step_distance_m,
+                                value,
+                            )
+                        except MotionOutOfBoundsError as exc:
+                            self.command_rejected.emit(str(exc))
+                            continue
+                        self.step_done.emit(self.sim.step_idx - 1, true_s, est_s, measurement)
+
+                    # Keep a small pause so a burst of queued commands still lets
+                    # the Qt event loop repaint telemetry and the map.
+                    self.msleep(50)
+            else:
+                for i in range(total):
+                    if not self._is_running:
+                        break
+                    true_s, est_s, m = self.sim.step()
+                    self.step_done.emit(i, true_s, est_s, m)
+                    self.msleep(100)  # Sleep to allow UI to update and user to see
+        finally:
+            self.sim.close()
+            self.finished_sim.emit()
 
     def stop(self):
         self.stopped_by_user = True
@@ -214,7 +215,7 @@ class MissionControlWindow(QMainWindow):
         scope_group = QGroupBox("Harita ve Arama Kapsamı")
         scope_layout = QVBoxLayout()
         self.lbl_map_scope = QLabel("Tam harita: simülasyon başlayınca hazırlanacak")
-        self.lbl_loaded_scope = QLabel("Yüklü DEM: simülasyon başlayınca hazırlanacak")
+        self.lbl_loaded_scope = QLabel("Lokalizasyon DEM'i: simülasyon başlayınca hazırlanacak")
         self.lbl_search_scope = QLabel("Aktif arama: bekleniyor")
         for label in (
             self.lbl_map_scope,
@@ -314,36 +315,39 @@ class MissionControlWindow(QMainWindow):
 
     def _update_scope_status(self, simulation: SimulationEngine) -> None:
         map_width, map_height = simulation.terrain.get_display_extent()
-        nav_width, nav_height = simulation.terrain.get_extent()
+        nav_rows, nav_cols = simulation.terrain.nav_dem.shape
         self.lbl_map_scope.setText(
             "Tam kaynak harita: "
-            f"{self._format_extent(map_width, map_height)} — İHA uçuş ve sensör kapsamı"
+            f"{self._format_extent(map_width, map_height)} — uçuş, sensör ve eşleştirme kapsamı"
         )
         self.lbl_loaded_scope.setText(
-            "Yüksek ayrıntılı eşleştirme kapsaması: "
-            f"{self._format_extent(nav_width, nav_height)} — İHA bu alanın dışına uçabilir"
+            f"Tam harita lokalizasyon DEM'i: {nav_cols} × {nav_rows} px — "
+            f"{simulation.terrain.dx:.2f} × {simulation.terrain.dy:.2f} m/px"
         )
         self._update_search_status(simulation.get_localization_status())
 
     def _update_search_status(self, status: dict) -> None:
         self.map_canvas.update_search_roi(status.get("draw_bounds"))
-        if status["mode"] == "outside_loaded_window":
-            self.lbl_search_scope.setText(
-                "Eşleştirme: kapsama dışında — uçuş ve kaynak DEM sensörü çalışıyor"
-            )
-            return
-        if status["mode"] == "full_loaded_window":
-            self.lbl_search_scope.setText(
-                "Aktif arama: yüklü DEM'in tamamı (ilk güvenilir eşleşme bekleniyor)"
-            )
+        if status["mode"] == "global_search":
+            if status.get("phase") == "recovery":
+                message = "Yeniden yakalama: tam kaynak haritada küresel arama"
+            elif status.get("phase") == "tracking":
+                message = "Aktif arama: tam kaynak harita (yerel ROI harita boyutunda)"
+            else:
+                message = "Aktif arama: tam kaynak harita (ilk güvenilir eşleşme bekleniyor)"
+            self.lbl_search_scope.setText(message)
             return
 
         row_start, row_end, col_start, col_end = status["bounds"]
         width_m = (col_end - col_start) * self.map_canvas.nav_dx
         height_m = (row_end - row_start) * self.map_canvas.nav_dy
+        prefix = (
+            "Yeniden yakalama ROI'si: "
+            if status.get("phase") == "recovery"
+            else "Aktif yerel eşleştirme ROI'si: "
+        )
         self.lbl_search_scope.setText(
-            "Aktif eşleştirme ROI'si (profil ankrajı): "
-            f"{self._format_extent(width_m, height_m)} "
+            prefix + f"{self._format_extent(width_m, height_m)} "
             f"({col_end - col_start} × {row_end - row_start} px)"
         )
 
@@ -466,7 +470,7 @@ class MissionControlWindow(QMainWindow):
         localization_status = (
             self.worker.sim.get_localization_status()
             if self.worker is not None and self.worker.sim is not None
-            else {"mode": "full_loaded_window", "draw_bounds": None}
+            else {"mode": "global_search", "phase": "initial", "draw_bounds": None}
         )
 
         if est_state is None:
@@ -476,11 +480,21 @@ class MissionControlWindow(QMainWindow):
             self.lbl_score.setText("-")
             self.lbl_spread.setText("-")
 
-            if localization_status["mode"] == "outside_loaded_window":
+            if localization_status.get("rejection_reason") == "quality":
+                rejected_score = localization_status.get("rejected_score")
+                score_text = f"{rejected_score:.2f}" if rejected_score is not None else "-"
+                self.lbl_score.setText(score_text)
                 self.log_text.append(
-                    f"[{step_idx:03d}] İHA eşleştirme kapsamı dışında; uçuş ve sensör devam ediyor."
+                    f"[{step_idx:03d}] Aday eşleşme kalite kapısından reddedildi "
+                    f"(skor: {score_text})."
                 )
-                self.lbl_ambig.setText("KAPSAMA DIŞI")
+                self.lbl_ambig.setText("KALİTE YETERSİZ")
+                self.lbl_ambig.setStyleSheet("color: #f38ba8;")
+            elif localization_status.get("phase") == "recovery":
+                self.log_text.append(
+                    f"[{step_idx:03d}] Eşleşme kayboldu; arama alanı genişletiliyor."
+                )
+                self.lbl_ambig.setText("YENİDEN ARANIYOR")
                 self.lbl_ambig.setStyleSheet("color: #fab387;")
             else:
                 self.log_text.append(f"[{step_idx:03d}] Harita eşleştirme verisi bekleniyor...")
@@ -500,7 +514,10 @@ class MissionControlWindow(QMainWindow):
             err_pos = (err_x**2 + err_y**2) ** 0.5
 
             self.lbl_error_pos.setText(f"{err_pos:.1f} m")
-            self.lbl_score.setText(f"{est_state.score:.2f}")
+            quality_score = est_state.quality_score
+            if quality_score is None:
+                quality_score = est_state.score
+            self.lbl_score.setText(f"{quality_score:.2f}")
 
             if est_state.is_ambiguous:
                 self.lbl_ambig.setText("BELİRSİZ (AMBIG)")

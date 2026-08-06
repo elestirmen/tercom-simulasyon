@@ -28,15 +28,25 @@ class TerrainManager:
         self.source_dx = float(config.dx)
         self.source_dy = float(config.dy)
         self.source_bounds: Optional[Tuple[float, float, float, float]] = None
-        self.window_offset = (0, 0)
         self.source_shape: Optional[Tuple[int, int]] = None
         self._display_dem: Optional[np.ndarray] = None
         self._display_dem_max_edge = 0
         self._source_max_elevation: Optional[float] = None
+        self._source_dataset = None
         self._generate()
 
+    def close(self) -> None:
+        """Release a lazily opened external raster handle."""
+        dataset = self._source_dataset
+        if dataset is not None:
+            dataset.close()
+            self._source_dataset = None
+
+    def __del__(self):
+        self.close()
+
     def _generate(self) -> None:
-        """Load a bounded external DEM window or generate a synthetic one."""
+        """Load a bounded-resolution complete DEM or generate a synthetic one."""
         dem_path = pathlib.Path(self.config.dem_path) if self.config.dem_path else None
         if dem_path is not None:
             self.truth_dem = self._load_external_dem(dem_path)
@@ -96,47 +106,29 @@ class TerrainManager:
                 float(dataset.bounds.bottom),
                 float(dataset.bounds.top),
             )
-            window_size = max(2, int(self.config.dem_window_size))
-            window_height = min(window_size, dataset.height)
-            window_width = min(window_size, dataset.width)
-
-            row_off = int(self.config.dem_window_row)
-            col_off = int(self.config.dem_window_col)
-            if row_off < 0:
-                row_off = (dataset.height - window_height) // 2
-            if col_off < 0:
-                col_off = (dataset.width - window_width) // 2
-            row_off = min(max(0, row_off), dataset.height - window_height)
-            col_off = min(max(0, col_off), dataset.width - window_width)
-            self.window_offset = (row_off, col_off)
-
-            window = Window(col_off, row_off, window_width, window_height)
             target_size = max(2, int(self.config.dem_target_size))
-            scale = min(1.0, target_size / max(window_width, window_height))
-            target_height = max(2, int(round(window_height * scale)))
-            target_width = max(2, int(round(window_width * scale)))
+            scale = min(1.0, target_size / max(dataset.width, dataset.height))
+            target_height = max(2, int(round(dataset.height * scale)))
+            target_width = max(2, int(round(dataset.width * scale)))
 
-            read_kwargs = {
-                "window": window,
-                "masked": True,
-                "out_dtype": "float32",
-            }
-            if (target_height, target_width) != (window_height, window_width):
-                read_kwargs["out_shape"] = (1, target_height, target_width)
+            read_kwargs = {"masked": True, "out_dtype": "float32"}
+            if (target_height, target_width) != (dataset.height, dataset.width):
+                read_kwargs["out_shape"] = (target_height, target_width)
                 read_kwargs["resampling"] = Resampling.bilinear
             dem = dataset.read(1, **read_kwargs)
             if np.ma.isMaskedArray(dem):
                 dem = dem.filled(np.nan)
             dem = np.asarray(dem, dtype=np.float32)
 
-            # Keep the source window's physical extent after resampling. This
-            # is critical: route distances and coordinate conversion must not
-            # accidentally become four times smaller with a 2x downsample.
-            source_dx, source_dy = map(float, dataset.res)
-            self.source_dx = abs(source_dx)
-            self.source_dy = abs(source_dy)
-            self.dx = source_dx * window_width / dem.shape[1]
-            self.dy = source_dy * window_height / dem.shape[0]
+            # Preserve the complete source extent after resampling. The search
+            # raster therefore covers every valid aircraft position with a
+            # predictable memory footprint.
+            source_width = float(dataset.bounds.right - dataset.bounds.left)
+            source_height = float(dataset.bounds.top - dataset.bounds.bottom)
+            self.source_dx = source_width / dataset.width
+            self.source_dy = source_height / dataset.height
+            self.dx = source_width / dem.shape[1]
+            self.dy = source_height / dem.shape[0]
             finite_ratio = float(np.isfinite(dem).mean())
             if finite_ratio < 0.99:
                 raise ValueError(
@@ -169,18 +161,14 @@ class TerrainManager:
         x: float,
         y: float,
     ) -> Tuple[float, float]:
-        """Convert loaded-window coordinates to complete source-map coordinates."""
+        """Convert local navigation coordinates to source-map coordinates."""
         offset_x, offset_y = self.get_display_offset()
         return x + offset_x, y + offset_y
 
     def is_inside_navigation_window(self, x: float, y: float) -> bool:
-        """Return whether a navigation-world point is inside the loaded DEM window."""
-        col = x / self.dx
-        row = -y / self.dy
-        row_index = int(round(row))
-        col_index = int(round(col))
-        rows, cols = self.truth_dem.shape
-        return 0 <= row_index < rows and 0 <= col_index < cols
+        """Return whether a point is covered by the complete localization DEM."""
+        width, height = self.get_extent()
+        return 0.0 <= x < width and -height < y <= 0.0
 
     def is_inside_source_map(self, x: float, y: float) -> bool:
         """Return whether a navigation-world point is inside the full source map."""
@@ -190,26 +178,28 @@ class TerrainManager:
 
     def sample_elevation_at_world(self, x: float, y: float) -> float:
         """Sample truth elevation anywhere inside the complete source map."""
-        if self.is_inside_navigation_window(x, y):
-            row = int(round(-y / self.dy))
-            col = int(round(x / self.dx))
+        dem_path = pathlib.Path(self.config.dem_path) if self.config.dem_path else None
+        if dem_path is None:
+            if not self.is_inside_navigation_window(x, y):
+                raise ValueError("Konum kaynak DEM kapsamının dışında.")
+            row = int(np.floor(-y / self.dy))
+            col = int(np.floor(x / self.dx))
             return self.sample_truth_elevation(row, col)
 
-        dem_path = pathlib.Path(self.config.dem_path) if self.config.dem_path else None
-        if dem_path is None or not self.is_inside_source_map(x, y):
+        if not self.is_inside_source_map(x, y):
             raise ValueError("Konum kaynak DEM kapsamının dışında.")
 
         display_x, display_y = self.navigation_world_to_display(x, y)
-        left, _right, _bottom, top = self.get_display_bounds()
-        source_col = int((display_x - left) / self.source_dx)
-        source_row = int((top - display_y) / self.source_dy)
-        with rasterio.open(dem_path) as dataset:
-            sample = dataset.read(
-                1,
-                window=Window(source_col, source_row, 1, 1),
-                masked=True,
-                out_dtype="float32",
-            )
+        if self._source_dataset is None:
+            self._source_dataset = rasterio.open(dem_path)
+        dataset = self._source_dataset
+        source_row, source_col = dataset.index(display_x, display_y)
+        sample = dataset.read(
+            1,
+            window=Window(source_col, source_row, 1, 1),
+            masked=True,
+            out_dtype="float32",
+        )
         if np.ma.isMaskedArray(sample) and np.ma.is_masked(sample[0, 0]):
             raise ValueError("Konumda geçerli kaynak DEM yüksekliği bulunamadı.")
         value = float(np.asarray(sample)[0, 0])
@@ -254,9 +244,8 @@ class TerrainManager:
     def get_display_dem(self, max_edge: int = 1600) -> np.ndarray:
         """Return a bounded overview raster for UI display only.
 
-        Localization keeps using the configured high-detail window. For an
-        external DEM this method separately downsamples the complete source so
-        the operator can see where that window and the aircraft sit on the map.
+        Localization uses a bounded-resolution copy of the complete source.
+        This method may use a smaller copy suited specifically to rendering.
         """
         dem_path = pathlib.Path(self.config.dem_path) if self.config.dem_path else None
         if dem_path is None:
@@ -303,16 +292,6 @@ class TerrainManager:
         return 0.0, width, -height, 0.0
 
     def get_display_offset(self) -> Tuple[float, float]:
-        """Translate local navigation-world coordinates into overview coordinates."""
-        row_off, col_off = self.window_offset
+        """Translate local navigation coordinates into overview coordinates."""
         left, _right, _bottom, top = self.get_display_bounds()
-        return (
-            left + col_off * self.source_dx,
-            top - row_off * self.source_dy,
-        )
-
-    def get_navigation_bounds_on_display(self) -> Tuple[float, float, float, float]:
-        """Return local navigation-window bounds in complete-map coordinates."""
-        offset_x, offset_y = self.get_display_offset()
-        width, height = self.get_extent()
-        return offset_x, offset_x + width, offset_y - height, offset_y
+        return left, top

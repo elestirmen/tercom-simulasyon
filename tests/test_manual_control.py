@@ -79,7 +79,7 @@ def test_manual_command_budget_uses_manual_step_distance():
     assert sim.step_idx == 4
 
 
-def test_manual_motion_cannot_leave_loaded_dem_window():
+def test_manual_motion_cannot_leave_source_map():
     sim = SimulationEngine(_manual_config(), manual_control=True)
     sim.execute_motion(100.0, 0.0)
     state_before_rejected_command = sim.get_current_state()
@@ -92,7 +92,7 @@ def test_manual_motion_cannot_leave_loaded_dem_window():
     assert sim.step_idx == step_before_rejected_command
 
 
-def test_manual_motion_can_leave_localization_coverage_inside_source_map(tmp_path):
+def test_manual_motion_searches_everywhere_inside_source_map(tmp_path, monkeypatch):
     dem_path = tmp_path / "wide_source_dem.tif"
     source = np.full((20, 20), 1200.0, dtype=np.float32)
     with rasterio.open(
@@ -111,23 +111,24 @@ def test_manual_motion_can_leave_localization_coverage_inside_source_map(tmp_pat
     config = LocalizationConfig(
         terrain=TerrainConfig(
             dem_path=str(dem_path),
-            dem_window_size=4,
             dem_target_size=4,
             dem_noise_std_m=0.0,
         )
     )
     sim = SimulationEngine(config, manual_control=True)
+    localization_calls = []
+    monkeypatch.setattr(
+        sim.localization,
+        "localize",
+        lambda timestamp: localization_calls.append(timestamp),
+    )
 
     true_state, estimate, measurement = sim.execute_motion(50.0, 90.0)
 
     assert sim.terrain.is_inside_source_map(true_state[0], true_state[1])
-    assert not sim.terrain.is_inside_navigation_window(true_state[0], true_state[1])
+    assert sim.terrain.is_inside_navigation_window(true_state[0], true_state[1])
     assert estimate is None
     assert measurement.laser_agl_m > 0.0
-    assert sim.get_localization_status()["mode"] == "outside_loaded_window"
-
-    _true_state, estimate, _measurement = sim.execute_motion(50.0, 270.0)
-
-    assert estimate is None
-    assert sim.get_localization_status()["mode"] == "full_loaded_window"
+    assert sim.get_localization_status()["mode"] == "global_search"
     assert len(sim.localization.measurements) == 1
+    assert localization_calls == [0.0]

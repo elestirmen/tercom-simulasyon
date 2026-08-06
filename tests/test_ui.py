@@ -19,8 +19,9 @@ def test_ui_starts_with_active_map_scope_and_heading_arrow() -> None:
 
         assert window.worker is not None
         assert window.worker.isRunning()
-        assert "uçuş ve sensör kapsamı" in window.lbl_map_scope.text()
-        assert "eşleştirme kapsaması" in window.lbl_loaded_scope.text()
+        assert "uçuş, sensör ve eşleştirme kapsamı" in window.lbl_map_scope.text()
+        assert "Tam harita lokalizasyon DEM'i" in window.lbl_loaded_scope.text()
+        assert "tam kaynak harita" in window.lbl_search_scope.text()
         assert window.map_canvas.true_heading_arrow is not None
         assert window.lbl_true_pos.text() != "-"
     finally:

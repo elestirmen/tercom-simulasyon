@@ -16,14 +16,12 @@ class TerrainConfig:
     base_elevation: float = 1000.0
     dem_noise_std_m: float = 0.5
     dem_bias_m: float = 0.0
-    # Optional external DEM. When set, only a bounded raster window is read.
+    # Optional external DEM. The complete source is resampled to a bounded
+    # in-memory raster so localization can search everywhere the aircraft flies.
     dem_path: str = ""
-    dem_window_size: int = 4096
-    # Maximum edge length of the in-memory/search raster. The source window's
-    # physical extent is preserved while reducing the number of search cells.
+    # Maximum edge length of the complete in-memory/search raster. The source
+    # map's physical extent is preserved while reducing the number of cells.
     dem_target_size: int = 2048
-    dem_window_row: int = -1
-    dem_window_col: int = -1
     external_auto_center_start: bool = True
 
 
@@ -84,6 +82,13 @@ class AlgorithmConfig:
     # Loss method: rmse, mae, huber
     loss_method: str = "huber"
     huber_delta: float = 10.0
+    # A candidate must pass absolute quality checks before it can become a fix.
+    # Quality is measured on the inlier profile so a single laser outlier does
+    # not poison the whole sliding window.
+    quality_trim_fraction: float = 0.05
+    max_match_inlier_rmse_m: float = 3.0
+    min_match_inlier_correlation: float = 0.80
+    min_match_valid_ratio: float = 0.80
 
     # Online localization window
     profile_window_size: int = 100  # How many past measurements to use

@@ -1,6 +1,7 @@
 """Metrics definitions."""
 
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
@@ -14,3 +15,5 @@ class EstimatedState:
     score: float
     spatial_spread: float
     score_margin: float
+    quality_score: Optional[float] = None
+    quality_correlation: Optional[float] = None

@@ -82,22 +82,6 @@ class MapCanvas(FigureCanvas):
         )
         self.axes.add_patch(self.true_heading_arrow)
 
-        window_x0, window_x1, window_y0, window_y1 = tm.get_navigation_bounds_on_display()
-        if (window_x1 - window_x0) < max_x or (window_y1 - window_y0) < max_y:
-            self.axes.add_patch(
-                Rectangle(
-                    (window_x0, window_y0),
-                    window_x1 - window_x0,
-                    window_y1 - window_y0,
-                    fill=False,
-                    edgecolor="#f9e2af",
-                    linewidth=1.8,
-                    linestyle="--",
-                    zorder=5,
-                    label="Yüksek ayrıntılı lokalizasyon kapsaması",
-                )
-            )
-
         self.search_roi_patch = Rectangle(
             (0.0, 0.0),
             0.0,

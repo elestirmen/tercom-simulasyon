@@ -31,15 +31,23 @@ uygular. Değerler `RouteConfig` üzerinden değiştirilebilir.
 
 ## Harita kapsamları
 
-- Tam kaynak harita, İHA uçuşunun ve kaynak DEM sensör örneklemesinin sınırıdır.
-- Kesikli çerçeve, bellekteki yüksek ayrıntılı lokalizasyon kapsamasıdır.
-- Turuncu ROI, profil eşleştiricinin o adımda aradığı dinamik alt bölgedir.
-- İHA lokalizasyon kapsamasının dışına uçabilir; bu durumda sensör ve uçuş sürer,
-  eşleştirme kapsama dönene kadar bekler.
+- Tam kaynak harita; İHA uçuşunun, sensör örneklemesinin ve lokalizasyonun ortak
+  kapsamıdır. İHA yalnızca gerçek kaynak harita sınırında durdurulur.
+- İlk güvenilir eşleşme bulunana kadar profil bütün haritada aranır.
+- Turuncu ROI, güvenilir eşleşmeden sonra kullanılan hızlı yerel arama alanıdır.
+- Eşleşme kaybolursa ROI kademeli büyür; eski ankraj geçersiz olduğunda sistem
+  ölçüm profilini koruyarak yeniden bütün haritada arama yapar.
+- Manuel dönüşlerde her ölçüm, kendisine ulaşan hareket vektörüyle profile
+  eklenir; böylece L ve zikzak rotaların geometrisi korunur.
+- Inlier RMSE, inlier korelasyonu veya geçerli örnek oranı yetersiz bir aday
+  konum `FIX` olarak kabul edilmez ve yanlış bir yerel ROI ankrajı oluşturamaz.
+  Kalite kapısı, profilin en kötü küçük yüzdesini dışarıda bırakarak tekil lazer
+  outlier'larının uzun süreli `KALİTE YETERSİZ` üretmesini engeller.
 
-Varsayılan dış DEM penceresi 4096 kaynak pikselden okunup 2048 hücreye
-yeniden örneklenir. `--dem-window-size`, `--dem-target-size`, `--dem-row`,
-`--dem-col` ve `--search-roi-size` seçenekleri bu davranışı kontrol eder.
+Dış DEM'in tamamı, uzun kenarı varsayılan olarak 2048 hücre olacak şekilde
+yeniden örneklenir. Böylece bellek kullanımı sınırlı kalırken haritanın hiçbir
+bölümü lokalizasyon dışında bırakılmaz. `--dem-target-size` ve
+`--search-roi-size` seçenekleri çözünürlük ile yerel ROI boyutunu kontrol eder.
 
 ## Yapı
 

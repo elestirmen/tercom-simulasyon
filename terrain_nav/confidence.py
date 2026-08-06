@@ -1,6 +1,6 @@
 """Confidence and ambiguity detection for profile matching."""
 
-from typing import List, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 
@@ -11,6 +11,7 @@ def detect_ambiguity(
     candidates: List[Candidate],
     score_margin_threshold: float = 0.05,
     spatial_spread_threshold_px: float = 10.0,
+    score_getter: Optional[Callable[[Candidate], float]] = None,
 ) -> Tuple[bool, float, float]:
     """
     Detects if the match is ambiguous based on top candidates.
@@ -21,11 +22,14 @@ def detect_ambiguity(
 
     c1 = candidates[0]
     c2 = candidates[1]
+    get_score = score_getter or (lambda candidate: candidate.score)
 
     # 1. Score Margin
     # If the second best is very close in score to the best, it might be ambiguous.
     epsilon = 1e-6
-    margin = abs(c2.score - c1.score) / max(abs(c2.score), epsilon)
+    score_1 = get_score(c1)
+    score_2 = get_score(c2)
+    margin = abs(score_2 - score_1) / max(abs(score_2), epsilon)
 
     # 2. Spatial spread of Top K
     # If top candidates are all clustered together, it's just a local minimum plateau.

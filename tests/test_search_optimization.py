@@ -373,6 +373,38 @@ def test_default_no_roi_keeps_global_search_after_fix():
     assert status["has_anchor"]
 
 
+def test_profile_comparison_exposes_measured_and_best_match_profiles():
+    config = LocalizationConfig()
+    object.__setattr__(config.sensor, "constant_msl_m", 1000.0)
+    object.__setattr__(config.algorithm, "min_profile_length", 2)
+    dem = np.zeros((5, 5), dtype=np.float32)
+    dem[2, 2] = 900.0
+    dem[2, 3] = 910.0
+    engine = LocalizationEngine(config, dem, CoordinateTransform(1.0, 1.0))
+    engine.add_measurement(Measurement(100.0, True, 1000.0, 90.0, 0.0))
+    engine.add_measurement(Measurement(90.0, True, 1000.0, 90.0, 1.0))
+    engine.matcher.coarse_to_fine_search = lambda *args, **kwargs: [
+        Candidate(
+            2.0,
+            2.0,
+            90.0,
+            1000.0,
+            0.0,
+            1.0,
+            {"inlier_rmse": 0.0, "inlier_correlation": 1.0},
+        )
+    ]
+
+    assert engine.localize(0.0) is not None
+    comparison = engine.get_profile_comparison()
+
+    assert comparison is not None
+    assert comparison.status == "fix"
+    assert np.allclose(comparison.distances_m, [0.0, 1.0])
+    assert np.allclose(comparison.measured_elevation_m, [900.0, 910.0])
+    assert np.allclose(comparison.matched_elevation_m, [900.0, 910.0])
+
+
 def test_full_roi_failure_drops_stale_anchor_and_reacquires_globally():
     config = LocalizationConfig()
     object.__setattr__(config.algorithm, "min_profile_length", 1)

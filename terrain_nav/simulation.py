@@ -10,7 +10,8 @@ from terrain_nav.confidence import detect_ambiguity
 from terrain_nav.config import LocalizationConfig
 from terrain_nav.coordinates import CoordinateTransform
 from terrain_nav.matcher import Candidate, ProfileMatcher
-from terrain_nav.metrics import EstimatedState
+from terrain_nav.metrics import EstimatedState, ProfileComparison
+from terrain_nav.profile import extract_profile, rotate_offsets
 from terrain_nav.sensors import Measurement, SensorSimulator
 from terrain_nav.terrain import TerrainManager
 
@@ -36,6 +37,7 @@ class LocalizationEngine:
         self.recovery_active = False
         self.last_rejection_reason: Optional[str] = None
         self.last_rejected_score: Optional[float] = None
+        self.last_profile_comparison: Optional[ProfileComparison] = None
 
     def _drop_oldest_measurement(self) -> None:
         """Remove the oldest sample and keep the profile-start anchor aligned."""
@@ -95,6 +97,87 @@ class LocalizationEngine:
     def _profile_distance_m(self) -> float:
         """Return the measured horizontal span covered by the current profile."""
         return float(sum(m.traveled_distance_m for m in self.measurements[1:]))
+
+    def _profile_distances_m(self) -> list[float]:
+        distances = []
+        total = 0.0
+        for index, measurement in enumerate(self.measurements):
+            if index > 0:
+                total += float(measurement.traveled_distance_m)
+            distances.append(total)
+        return distances
+
+    def _measured_terrain_profile(
+        self,
+        laser_agl: np.ndarray,
+        laser_valid: np.ndarray,
+        baro_msl: np.ndarray,
+        matched_dem: np.ndarray,
+        candidate: Optional[Candidate],
+    ) -> np.ndarray:
+        measured = np.full(len(laser_agl), np.nan, dtype=np.float64)
+        mode = self.config.sensor.altitude_mode
+        if mode == "known_msl_altitude":
+            measured = float(self.config.sensor.constant_msl_m) - laser_agl
+        elif mode == "unknown_constant_msl_altitude":
+            if candidate is not None and np.isfinite(candidate.estimated_msl_m):
+                measured = float(candidate.estimated_msl_m) - laser_agl
+        elif mode == "barometric_altitude":
+            valid_for_bias = laser_valid & ~np.isnan(matched_dem)
+            if np.any(valid_for_bias):
+                bias = float(
+                    np.median(
+                        laser_agl[valid_for_bias]
+                        + matched_dem[valid_for_bias]
+                        - baro_msl[valid_for_bias]
+                    )
+                )
+                measured = baro_msl + bias - laser_agl
+            else:
+                measured = baro_msl - laser_agl
+        else:
+            raise ValueError(f"Unknown altitude mode: {mode}")
+
+        measured = measured.astype(np.float64, copy=False)
+        measured[~laser_valid] = np.nan
+        return measured
+
+    def _build_profile_comparison(
+        self,
+        candidate: Optional[Candidate],
+        status: str,
+    ) -> ProfileComparison:
+        laser = np.array([m.laser_agl_m for m in self.measurements], dtype=np.float64)
+        valid = np.array([m.laser_valid for m in self.measurements], dtype=bool)
+        baro = np.array([m.baro_msl_m for m in self.measurements], dtype=np.float64)
+        matched_dem = np.full(len(laser), np.nan, dtype=np.float64)
+
+        if candidate is not None and self.relative_offsets:
+            angle_delta = candidate.heading_deg - self.relative_offsets[0][2]
+            matched_dem = extract_profile(
+                self.nav_dem,
+                candidate.row,
+                candidate.col,
+                rotate_offsets(self.relative_offsets, angle_delta),
+                self.ct,
+            )
+
+        measured = self._measured_terrain_profile(laser, valid, baro, matched_dem, candidate)
+        quality_score = (
+            self._candidate_quality_score(candidate) if candidate is not None else None
+        )
+        quality_correlation = (
+            self._candidate_quality_correlation(candidate) if candidate is not None else None
+        )
+        return ProfileComparison(
+            distances_m=self._profile_distances_m(),
+            measured_elevation_m=measured.tolist(),
+            matched_elevation_m=matched_dem.tolist(),
+            status=status,
+            candidate_score=candidate.score if candidate is not None else None,
+            quality_score=quality_score,
+            quality_correlation=quality_correlation,
+        )
 
     def _search_bounds(self) -> Optional[Tuple[int, int, int, int]]:
         if self.last_match_pixel is None or self.current_search_roi_size <= 0:
@@ -201,6 +284,10 @@ class LocalizationEngine:
             "rejected_score": self.last_rejected_score,
         }
 
+    def get_profile_comparison(self) -> Optional[ProfileComparison]:
+        """Return the latest measured-vs-candidate terrain profile for UI display."""
+        return self.last_profile_comparison
+
     def localize(self, timestamp: float) -> Optional[EstimatedState]:
         algorithm = self.config.algorithm
         if (
@@ -209,6 +296,10 @@ class LocalizationEngine:
         ):
             self.last_rejection_reason = "profile_incomplete"
             self.last_rejected_score = None
+            self.last_profile_comparison = self._build_profile_comparison(
+                None,
+                "profile_incomplete",
+            )
             return None
 
         laser = np.array([m.laser_agl_m for m in self.measurements])
@@ -240,6 +331,7 @@ class LocalizationEngine:
         if not cands:
             self.last_rejection_reason = "no_candidates"
             self.last_rejected_score = None
+            self.last_profile_comparison = self._build_profile_comparison(None, "no_candidates")
             self._reject_search_result(search_bounds)
             return None
 
@@ -258,6 +350,10 @@ class LocalizationEngine:
             if not plausible_cands:
                 self.last_rejection_reason = "continuity"
                 self.last_rejected_score = cands[0].score
+                self.last_profile_comparison = self._build_profile_comparison(
+                    cands[0],
+                    "continuity_rejected",
+                )
                 self._reject_search_result(search_bounds)
                 return None
             cands = plausible_cands
@@ -268,6 +364,10 @@ class LocalizationEngine:
         if not quality_cands:
             self.last_rejection_reason = "quality"
             self.last_rejected_score = self._candidate_quality_score(cands[0])
+            self.last_profile_comparison = self._build_profile_comparison(
+                cands[0],
+                "quality_rejected",
+            )
             self._reject_search_result(search_bounds)
             return None
         cands = sorted(
@@ -306,6 +406,11 @@ class LocalizationEngine:
             self.last_match_pixel = (best.row, best.col)
             self.current_search_roi_size = self.base_search_roi_size
             self.recovery_active = False
+
+        self.last_profile_comparison = self._build_profile_comparison(
+            best,
+            "ambiguous" if is_ambiguous else "fix",
+        )
 
         # `best.row`, `best.col` is the location of the *start* of the window (the oldest point).
         # We want the location of the *current* point (the newest point).
@@ -378,9 +483,8 @@ class SimulationEngine:
         self.ct = CoordinateTransform(self.terrain.dx, self.terrain.dy)
 
         self.manual_control = manual_control
-        # In manual mode one command represents one sensor observation. Limit
-        # the number of commands by the configured route length, using the
-        # larger UI movement quantum rather than the automatic sample spacing.
+        # In manual mode this remains a command-count hint for the UI; each
+        # command may still generate several sensor/localization samples.
         if manual_control:
             self.total_steps = int(
                 math.ceil(config.route.route_length_m / config.route.manual_step_distance_m)
@@ -435,6 +539,10 @@ class SimulationEngine:
         """Return UI-safe localization search state without exposing truth."""
         return self.localization.get_search_status()
 
+    def get_profile_comparison(self) -> Optional[ProfileComparison]:
+        """Return the latest measured-vs-matched terrain profile."""
+        return self.localization.get_profile_comparison()
+
     def _validate_world_position(self, x: float, y: float) -> None:
         if not self.terrain.is_inside_source_map(x, y):
             raise MotionOutOfBoundsError("Komut reddedildi: İHA kaynak haritanın dışına çıkamaz.")
@@ -487,15 +595,42 @@ class SimulationEngine:
             raise ValueError("Manual movement distance must be positive")
 
         movement_heading = (self.dynamic_h + relative_heading_deg) % 360.0
-        dx, dy = self.ct.offset_meters(distance_m, movement_heading)
-        next_x = self.dynamic_x + dx
-        next_y = self.dynamic_y + dy
-        self._validate_world_position(next_x, next_y)
-        self.dynamic_x = next_x
-        self.dynamic_y = next_y
+        sample_spacing_m = max(1e-9, float(self.config.route.manual_sample_spacing_m))
+        segment_distances = []
+        remaining_distance_m = distance_m
+        while remaining_distance_m > 1e-9:
+            segment_distance_m = min(sample_spacing_m, remaining_distance_m)
+            segment_distances.append(segment_distance_m)
+            remaining_distance_m -= segment_distance_m
 
-        motion_dt_s = distance_m / max(self.config.route.speed_m_s, 1e-9)
-        return self._sample_current(distance_m, movement_heading, motion_dt_s)
+        planned_segments = []
+        cursor_x = self.dynamic_x
+        cursor_y = self.dynamic_y
+        for segment_distance_m in segment_distances:
+            dx, dy = self.ct.offset_meters(segment_distance_m, movement_heading)
+            cursor_x += dx
+            cursor_y += dy
+            self._validate_world_position(cursor_x, cursor_y)
+            planned_segments.append((cursor_x, cursor_y))
+
+        last_result = None
+        for segment_distance_m, (next_x, next_y) in zip(
+            segment_distances,
+            planned_segments,
+            strict=True,
+        ):
+            self.dynamic_x = next_x
+            self.dynamic_y = next_y
+            motion_dt_s = segment_distance_m / max(self.config.route.speed_m_s, 1e-9)
+            last_result = self._sample_current(
+                segment_distance_m,
+                movement_heading,
+                motion_dt_s,
+            )
+
+        if last_result is None:
+            raise RuntimeError("Manual movement did not produce a sensor sample")
+        return last_result
 
     def get_total_steps(self) -> int:
         return self.total_steps

@@ -23,7 +23,7 @@ from terrain_nav.config import (
     apply_realistic_noise_mode,
     uses_realistic_noise_mode,
 )
-from terrain_nav.rendering import MapCanvas
+from terrain_nav.rendering import MapCanvas, ProfileCanvas
 from terrain_nav.simulation import MotionOutOfBoundsError, SimulationEngine
 
 DARK_STYLESHEET = """
@@ -187,7 +187,16 @@ class MissionControlWindow(QMainWindow):
 
         top_layout = QHBoxLayout()
 
-        # --- Left Panel: Map ---
+        # --- Left Panel: Profile + Map ---
+        profile_group = QGroupBox("Profil Eşleşmesi")
+        profile_layout = QVBoxLayout()
+        self.profile_canvas = ProfileCanvas(self)
+        profile_group.setMinimumWidth(300)
+        profile_group.setMaximumWidth(420)
+        profile_layout.addWidget(self.profile_canvas)
+        profile_group.setLayout(profile_layout)
+        top_layout.addWidget(profile_group, 1)
+
         self.map_canvas = MapCanvas(self)
         top_layout.addWidget(self.map_canvas, 4)
 
@@ -216,6 +225,7 @@ class MissionControlWindow(QMainWindow):
         self.lbl_controls = QLabel(
             f"W ileri / S geri / A sol / D sağ "
             f"({self.config.route.manual_step_distance_m:.0f} m)\n"
+            f"Profil kaydı yaklaşık {self.config.route.manual_sample_spacing_m:.0f} m'de bir alınır.\n"
             f"Q sola / E sağa dön ({self.config.route.manual_turn_step_deg:.0f}°). "
             "Her komut sonrası sistem bekler."
         )
@@ -419,6 +429,7 @@ class MissionControlWindow(QMainWindow):
         # Reset paths
         self.true_path = []
         self.est_path = []
+        self.profile_canvas.clear_profile()
 
         # Build one shared simulation/terrain instance for both map rendering
         # and localization instead of loading the DEM twice.
@@ -496,6 +507,12 @@ class MissionControlWindow(QMainWindow):
             if self.worker is not None and self.worker.sim is not None
             else {"mode": "global_search", "phase": "initial", "draw_bounds": None}
         )
+        profile_comparison = (
+            self.worker.sim.get_profile_comparison()
+            if self.worker is not None and self.worker.sim is not None
+            else None
+        )
+        self.profile_canvas.update_profile(profile_comparison)
 
         if est_state is None:
             self.lbl_est_pos.setText("-")

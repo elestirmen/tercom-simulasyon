@@ -23,6 +23,8 @@ def test_ui_starts_with_active_map_scope_and_heading_arrow() -> None:
         assert "Tam harita lokalizasyon DEM'i" in window.lbl_loaded_scope.text()
         assert "tam kaynak harita" in window.lbl_search_scope.text()
         assert window.map_canvas.true_heading_arrow is not None
+        assert window.profile_canvas is not None
+        assert "Yükseklik profili" in window.profile_canvas.axes.get_title()
         assert window.lbl_true_pos.text() != "-"
     finally:
         window.stop_sim()

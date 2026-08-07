@@ -30,7 +30,9 @@ python run_terrain_nav.py --dem "C:\path\terrain.tif"
 ```
 
 Arayüz manuel çalışır: `W/S/A/D` 100 metre hareket, `Q/E` 15 derece dönüş
-uygular. Değerler `RouteConfig` üzerinden değiştirilebilir.
+uygular. Manuel hareket sırasında sensör/lokalizasyon profili varsayılan olarak
+20 metrede bir örneklenir; yani tek bir 100 metrelik komut profil grafiğine
+yaklaşık 5 yeni kayıt ekler. Değerler `RouteConfig` üzerinden değiştirilebilir.
 Arayüzdeki `Gerçekçi sensör gürültüsü` seçeneği, simülasyon başlamadan
 `--realistic-noise` ile aynı sensör modunu açıp kapatır.
 
@@ -69,8 +71,10 @@ sabit bilinmeyen bias ve gürültü vardır, lokalizasyona verilen hareket mesaf
 ise gürültülü hız ölçümünden türetilir. Bu mod, kısa profille yanlış global
 eşleşmeye kilitlenmemek için dış DEM koşularında varsayılan olarak en az
 800 metre ölçülmüş profil uzunluğu bekler ve hız gürültüsünün çok uzun profilde
-birikmesini azaltmak için kayan profili yaklaşık 2 km ile sınırlar. Pusula bu
-modda da bilinen yön olarak kalır; heading gürültüsü ayrıca
+birikmesini azaltmak için kayan profili yaklaşık 2 km ile sınırlar. Manuel UI'da
+20 metrelik örnekleme aralığıyla bu, aramada ve profil grafiğinde son yaklaşık
+100 ölçüm kaydının tutulması anlamına gelir. Pusula bu modda da bilinen yön
+olarak kalır; heading gürültüsü ayrıca
 `SensorConfig.heading_mode` üzerinden ayarlanabilir.
 
 ## Yapı

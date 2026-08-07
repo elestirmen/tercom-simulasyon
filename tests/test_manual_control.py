@@ -71,12 +71,13 @@ def test_manual_wasd_relative_directions_move_100_meters():
         assert abs((y1 - y0) - expected_dy) < 1e-6
 
 
-def test_manual_command_budget_uses_manual_step_distance():
+def test_manual_command_budget_keeps_motion_size_while_sampling_profile():
     sim = SimulationEngine(_manual_config(), manual_control=True)
     assert sim.get_total_steps() == 3
     for relative_heading in (0.0, 180.0, 0.0, 180.0):
         sim.execute_motion(100.0, relative_heading)
-    assert sim.step_idx == 4
+    assert sim.step_idx == 20
+    assert len(sim.localization.measurements) == 20
 
 
 def test_manual_motion_cannot_leave_source_map():
@@ -130,5 +131,5 @@ def test_manual_motion_searches_everywhere_inside_source_map(tmp_path, monkeypat
     assert estimate is None
     assert measurement.laser_agl_m > 0.0
     assert sim.get_localization_status()["mode"] == "global_search"
-    assert len(sim.localization.measurements) == 1
-    assert localization_calls == [0.0]
+    assert len(sim.localization.measurements) == 3
+    assert localization_calls == [0.0, 2.0, 4.0]

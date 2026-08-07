@@ -35,6 +35,7 @@ class RouteConfig:
     route_length_m: float = 1000.0
     # UI manual-control defaults. Headless simulations keep the automatic route.
     manual_step_distance_m: float = 100.0
+    manual_sample_spacing_m: float = 20.0
     manual_turn_step_deg: float = 15.0
 
 

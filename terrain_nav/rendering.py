@@ -4,12 +4,131 @@ import math
 from typing import List, Tuple
 
 import matplotlib.pyplot as plt
+import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from matplotlib.patches import FancyArrowPatch, Rectangle
 from matplotlib.ticker import FuncFormatter
 
+from terrain_nav.metrics import ProfileComparison
 from terrain_nav.terrain import TerrainManager
+
+
+class ProfileCanvas(FigureCanvas):
+    STATUS_LABELS = {
+        "profile_incomplete": "profil birikiyor",
+        "no_candidates": "aday yok",
+        "continuity_rejected": "süreklilik reddi",
+        "quality_rejected": "kalite reddi",
+        "ambiguous": "belirsiz aday",
+        "fix": "en iyi fix",
+    }
+    STATUS_COLORS = {
+        "profile_incomplete": "#a6adc8",
+        "no_candidates": "#f38ba8",
+        "continuity_rejected": "#fab387",
+        "quality_rejected": "#f38ba8",
+        "ambiguous": "#fab387",
+        "fix": "#a6e3a1",
+    }
+
+    def __init__(self, parent=None, width=3.2, height=4, dpi=100):
+        plt.style.use("dark_background")
+        self.fig = Figure(figsize=(width, height), dpi=dpi)
+        self.fig.patch.set_facecolor("#1e1e2e")
+        self.axes = self.fig.add_subplot(111)
+        self.axes.set_facecolor("#11111b")
+        super().__init__(self.fig)
+        self.setParent(parent)
+
+        (self.measured_line,) = self.axes.plot(
+            [],
+            [],
+            color="#00f0ff",
+            linewidth=2.2,
+            label="Aranan profil",
+        )
+        (self.matched_line,) = self.axes.plot(
+            [],
+            [],
+            color="#f9e2af",
+            linestyle="--",
+            linewidth=2.2,
+            label="En iyi DEM",
+        )
+        self.axes.grid(color="#333333", linestyle="--", linewidth=0.5, alpha=0.7)
+        self.axes.legend(
+            loc="upper right",
+            facecolor="#1e1e2e",
+            edgecolor="#444444",
+            fontsize=8,
+        )
+        self.axes.tick_params(axis="x", labelrotation=25, labelsize=8)
+        self.axes.tick_params(axis="y", labelsize=8)
+        self.axes.set_xlabel("Profil mesafesi (m)", color="gray")
+        self.axes.set_ylabel("Arazi kotu (m)", color="gray")
+        self.clear_profile()
+
+    def clear_profile(self) -> None:
+        self.measured_line.set_data([], [])
+        self.matched_line.set_data([], [])
+        self.axes.set_title("Yükseklik profili bekleniyor", color="#a6adc8", pad=12)
+        self.axes.set_xlim(0.0, 1.0)
+        self.axes.set_ylim(0.0, 1.0)
+        self.fig.tight_layout()
+        self.draw()
+
+    def update_profile(self, comparison: ProfileComparison | None) -> None:
+        if comparison is None or not comparison.distances_m:
+            self.clear_profile()
+            return
+
+        x = np.asarray(comparison.distances_m, dtype=np.float64)
+        measured = np.asarray(comparison.measured_elevation_m, dtype=np.float64)
+        matched = np.asarray(comparison.matched_elevation_m, dtype=np.float64)
+        measured_valid = np.isfinite(x) & np.isfinite(measured)
+        matched_valid = np.isfinite(x) & np.isfinite(matched)
+
+        self.measured_line.set_data(x[measured_valid], measured[measured_valid])
+        self.matched_line.set_data(x[matched_valid], matched[matched_valid])
+
+        visible_values = []
+        if np.any(measured_valid):
+            visible_values.append(measured[measured_valid])
+        if np.any(matched_valid):
+            visible_values.append(matched[matched_valid])
+        if not visible_values:
+            self.clear_profile()
+            return
+
+        y_values = np.concatenate(visible_values)
+        y_min = float(np.nanmin(y_values))
+        y_max = float(np.nanmax(y_values))
+        y_pad = max(1.0, (y_max - y_min) * 0.12)
+        x_min = float(np.nanmin(x))
+        x_max = float(np.nanmax(x))
+        x_pad = max(1.0, (x_max - x_min) * 0.04)
+        self.axes.set_xlim(x_min - x_pad, x_max + x_pad)
+        self.axes.set_ylim(y_min - y_pad, y_max + y_pad)
+
+        status = comparison.status
+        status_text = self.STATUS_LABELS.get(status, status)
+        details = []
+        if comparison.quality_score is not None and np.isfinite(comparison.quality_score):
+            details.append(f"hata {comparison.quality_score:.2f} m")
+        if (
+            comparison.quality_correlation is not None
+            and np.isfinite(comparison.quality_correlation)
+        ):
+            details.append(f"korr {comparison.quality_correlation:.2f}")
+        suffix = f" | {', '.join(details)}" if details else ""
+        self.axes.set_title(
+            f"Yükseklik profili - {status_text}{suffix}",
+            color=self.STATUS_COLORS.get(status, "#cdd6f4"),
+            pad=12,
+        )
+        self.fig.tight_layout()
+        self.draw()
 
 
 class MapCanvas(FigureCanvas):
@@ -105,7 +224,6 @@ class MapCanvas(FigureCanvas):
         self.axes.grid(color="#333333", linestyle="--", linewidth=0.5, alpha=0.7)
         self.axes.legend(
             loc="upper right",
-            bbox_to_anchor=(-0.04, 1.0),
             facecolor="#1e1e2e",
             edgecolor="#444444",
             fontsize=8,

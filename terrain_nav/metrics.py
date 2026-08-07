@@ -17,3 +17,14 @@ class EstimatedState:
     score_margin: float
     quality_score: Optional[float] = None
     quality_correlation: Optional[float] = None
+
+
+@dataclass
+class ProfileComparison:
+    distances_m: list[float]
+    measured_elevation_m: list[float]
+    matched_elevation_m: list[float]
+    status: str
+    candidate_score: Optional[float] = None
+    quality_score: Optional[float] = None
+    quality_correlation: Optional[float] = None

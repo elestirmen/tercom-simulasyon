@@ -9,10 +9,10 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QFormLayout,
     QGroupBox,
-    QHBoxLayout,
     QLabel,
     QMainWindow,
     QPushButton,
+    QSplitter,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -43,6 +43,13 @@ QGroupBox::title {
     subcontrol-origin: margin;
     subcontrol-position: top left;
     left: 10px;
+}
+QSplitter::handle:horizontal {
+    width: 8px;
+    background-color: #45475a;
+}
+QSplitter::handle:horizontal:hover {
+    background-color: #89b4fa;
 }
 QPushButton {
     background-color: #313244;
@@ -185,20 +192,24 @@ class MissionControlWindow(QMainWindow):
         main_layout = QVBoxLayout(main_widget)
         main_layout.setContentsMargins(15, 15, 15, 15)
 
-        top_layout = QHBoxLayout()
+        self.main_splitter = QSplitter(Qt.Horizontal)
+        self.main_splitter.setObjectName("mainSplitter")
+        self.main_splitter.setChildrenCollapsible(False)
+        self.main_splitter.setHandleWidth(8)
 
         # --- Left Panel: Profile + Map ---
         profile_group = QGroupBox("Profil Eşleşmesi")
         profile_layout = QVBoxLayout()
         self.profile_canvas = ProfileCanvas(self)
-        profile_group.setMinimumWidth(300)
-        profile_group.setMaximumWidth(420)
+        self.profile_group = profile_group
+        profile_group.setMinimumWidth(280)
         profile_layout.addWidget(self.profile_canvas)
         profile_group.setLayout(profile_layout)
-        top_layout.addWidget(profile_group, 1)
+        self.main_splitter.addWidget(profile_group)
 
         self.map_canvas = MapCanvas(self)
-        top_layout.addWidget(self.map_canvas, 4)
+        self.map_canvas.setMinimumWidth(320)
+        self.main_splitter.addWidget(self.map_canvas)
 
         # --- Right Panel: Sidebar ---
         sidebar_layout = QVBoxLayout()
@@ -305,14 +316,22 @@ class MissionControlWindow(QMainWindow):
         sidebar_layout.addWidget(telemetry_group)
         sidebar_layout.addStretch()
 
-        top_layout.addLayout(sidebar_layout, 1)
+        self.sidebar_widget = QWidget()
+        self.sidebar_widget.setObjectName("sidebarWidget")
+        self.sidebar_widget.setMinimumWidth(300)
+        self.sidebar_widget.setLayout(sidebar_layout)
+        self.main_splitter.addWidget(self.sidebar_widget)
+        self.main_splitter.setStretchFactor(0, 2)
+        self.main_splitter.setStretchFactor(1, 5)
+        self.main_splitter.setStretchFactor(2, 2)
+        self.main_splitter.setSizes([380, 520, 360])
 
         # --- Bottom Panel: Console ---
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setMaximumHeight(160)
 
-        main_layout.addLayout(top_layout)
+        main_layout.addWidget(self.main_splitter, 1)
         main_layout.addWidget(self.log_text)
 
         self.worker = None

@@ -4,6 +4,7 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from run_terrain_nav import build_config
@@ -24,6 +25,10 @@ def test_ui_starts_with_active_map_scope_and_heading_arrow() -> None:
         assert "tam kaynak harita" in window.lbl_search_scope.text()
         assert window.map_canvas.true_heading_arrow is not None
         assert window.profile_canvas is not None
+        assert window.main_splitter.count() == 3
+        assert window.main_splitter.orientation() == Qt.Horizontal
+        assert window.main_splitter.handleWidth() == 8
+        assert window.profile_group.minimumWidth() == 280
         assert "Yükseklik profili" in window.profile_canvas.axes.get_title()
         assert window.lbl_true_pos.text() != "-"
     finally:

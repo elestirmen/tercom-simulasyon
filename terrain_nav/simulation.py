@@ -78,6 +78,10 @@ class LocalizationEngine:
                 curr_y += dy
             self.relative_offsets.append((curr_x, curr_y, measurement.sensor_heading_deg))
 
+    def _profile_distance_m(self) -> float:
+        """Return the measured horizontal span covered by the current profile."""
+        return float(sum(m.traveled_distance_m for m in self.measurements[1:]))
+
     def _search_bounds(self) -> Optional[Tuple[int, int, int, int]]:
         if self.last_match_pixel is None or self.current_search_roi_size <= 0:
             return None
@@ -184,7 +188,11 @@ class LocalizationEngine:
         }
 
     def localize(self, timestamp: float) -> Optional[EstimatedState]:
-        if len(self.measurements) < self.config.algorithm.min_profile_length:
+        algorithm = self.config.algorithm
+        if (
+            len(self.measurements) < algorithm.min_profile_length
+            or self._profile_distance_m() < algorithm.min_profile_distance_m
+        ):
             self.last_rejection_reason = "profile_incomplete"
             self.last_rejected_score = None
             return None

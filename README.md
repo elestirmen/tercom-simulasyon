@@ -22,12 +22,17 @@ python run_terrain_nav.py --fast
 # Headless doğrulama
 python run_terrain_nav.py --headless --fast
 
+# Gerçekçi sensör gürültüsü modu
+python run_terrain_nav.py --realistic-noise
+
 # Başka bir GeoTIFF
 python run_terrain_nav.py --dem "C:\path\terrain.tif"
 ```
 
 Arayüz manuel çalışır: `W/S/A/D` 100 metre hareket, `Q/E` 15 derece dönüş
 uygular. Değerler `RouteConfig` üzerinden değiştirilebilir.
+Arayüzdeki `Gerçekçi sensör gürültüsü` seçeneği, simülasyon başlamadan
+`--realistic-noise` ile aynı sensör modunu açıp kapatır.
 
 ## Harita kapsamları
 
@@ -48,6 +53,20 @@ Dış DEM'in tamamı, uzun kenarı varsayılan olarak 2048 hücre olacak şekild
 yeniden örneklenir. Böylece bellek kullanımı sınırlı kalırken haritanın hiçbir
 bölümü lokalizasyon dışında bırakılmaz. `--dem-target-size` ve
 `--search-roi-size` seçenekleri çözünürlük ile yerel ROI boyutunu kontrol eder.
+
+## Sensör modları
+
+Varsayılan mod, mevcut regresyonları korumak için idealize edilmiştir:
+`known_msl_altitude`, bilinen pusula yönü, lazer altimetre ve kusursuz hız/mesafe
+bilgisiyle çalışır.
+
+`--realistic-noise` modu, aynı GPS'siz eşleştirme akışını daha gerçekçi ölçüm
+varsayımlarıyla çalıştırır: mutlak MSL irtifa doğrudan bilinmez, barometrede
+sabit bilinmeyen bias ve gürültü vardır, lokalizasyona verilen hareket mesafesi
+ise gürültülü hız ölçümünden türetilir. Bu mod, kısa profille yanlış global
+eşleşmeye kilitlenmemek için varsayılan olarak en az 400 metre ölçülmüş profil
+uzunluğu bekler. Pusula bu modda da bilinen yön olarak kalır; heading gürültüsü
+ayrıca `SensorConfig.heading_mode` üzerinden ayarlanabilir.
 
 ## Yapı
 

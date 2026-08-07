@@ -71,3 +71,16 @@ def test_heading_model():
     sim2 = SensorSimulator(c2)
     h2 = sim2.measure_heading(90.0)
     assert math.isclose(h2, 100.0)
+
+
+def test_speed_measurement_bias_changes_localizer_distance():
+    c = SensorConfig(speed_bias_m_s=1.0, speed_noise_std_m_s=0.0)
+    sim = SensorSimulator(c)
+
+    measured_distance, measured_speed = sim.measure_traveled_distance(
+        true_distance_m=10.0,
+        dt_s=2.0,
+    )
+
+    assert math.isclose(measured_speed, 6.0)
+    assert math.isclose(measured_distance, 12.0)

@@ -6,6 +6,7 @@ from queue import Empty, Queue
 from PySide6.QtCore import QEvent, Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -17,7 +18,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from terrain_nav.config import LocalizationConfig
+from terrain_nav.config import (
+    LocalizationConfig,
+    apply_realistic_noise_mode,
+    uses_realistic_noise_mode,
+)
 from terrain_nav.rendering import MapCanvas
 from terrain_nav.simulation import MotionOutOfBoundsError, SimulationEngine
 
@@ -166,7 +171,9 @@ class SimulationWorker(QThread):
 class MissionControlWindow(QMainWindow):
     def __init__(self, config=None):
         super().__init__()
-        self.config = config or LocalizationConfig()
+        incoming_config = config or LocalizationConfig()
+        self.base_config = apply_realistic_noise_mode(incoming_config, False)
+        self.config = self.base_config
         self.setWindowTitle("TERCOM Mission Control")
         self.resize(1280, 800)
 
@@ -194,10 +201,16 @@ class MissionControlWindow(QMainWindow):
         self.btn_start.setObjectName("btnStart")
         self.btn_stop = QPushButton("Acil Durdurma")
         self.btn_stop.setObjectName("btnStop")
+        self.chk_realistic_noise = QCheckBox("Gerçekçi sensör gürültüsü")
+        self.chk_realistic_noise.setChecked(uses_realistic_noise_mode(incoming_config))
+        self.chk_realistic_noise.setToolTip(
+            "Barometre bias/gürültüsü ve hız ölçüm sapmasını etkinleştirir."
+        )
 
         self.btn_start.clicked.connect(self.start_sim)
         self.btn_stop.clicked.connect(self.stop_sim)
 
+        ctrl_layout.addWidget(self.chk_realistic_noise)
         ctrl_layout.addWidget(self.btn_start)
         ctrl_layout.addWidget(self.btn_stop)
         self.lbl_controls = QLabel(
@@ -379,6 +392,12 @@ class MissionControlWindow(QMainWindow):
             return True
         return False
 
+    def _simulation_config(self) -> LocalizationConfig:
+        return apply_realistic_noise_mode(
+            self.base_config,
+            self.chk_realistic_noise.isChecked(),
+        )
+
     def eventFilter(self, watched, event):
         if event.type() == QEvent.KeyPress and self.isActiveWindow():
             if self._handle_manual_key(event.key(), event.isAutoRepeat()):
@@ -395,6 +414,7 @@ class MissionControlWindow(QMainWindow):
             return
 
         self.log_text.append("[SYSTEM] Simülasyon başlatılıyor...")
+        self.chk_realistic_noise.setEnabled(False)
 
         # Reset paths
         self.true_path = []
@@ -402,7 +422,11 @@ class MissionControlWindow(QMainWindow):
 
         # Build one shared simulation/terrain instance for both map rendering
         # and localization instead of loading the DEM twice.
-        simulation = SimulationEngine(self.config, manual_control=True)
+        simulation = SimulationEngine(self._simulation_config(), manual_control=True)
+        mode_text = (
+            "gerçekçi sensör gürültüsü" if self.chk_realistic_noise.isChecked() else "ideal sensör"
+        )
+        self.log_text.append(f"[SYSTEM] Sensör modu: {mode_text}.")
         self.map_canvas.plot_terrain(simulation.terrain)
         initial_state = simulation.get_current_state()
         self.true_path = [(initial_state[0], initial_state[1])]
@@ -541,6 +565,7 @@ class MissionControlWindow(QMainWindow):
         scrollbar.setValue(scrollbar.maximum())
 
     def on_finished(self):
+        self.chk_realistic_noise.setEnabled(True)
         if self.worker is not None and self.worker.stopped_by_user:
             return
         self.log_text.append("[SYSTEM] Simülasyon tamamlandı.")

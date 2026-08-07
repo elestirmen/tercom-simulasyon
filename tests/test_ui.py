@@ -28,3 +28,46 @@ def test_ui_starts_with_active_map_scope_and_heading_arrow() -> None:
         window.stop_sim()
         window.worker.wait(2000)
         window.close()
+
+
+def test_ui_realistic_noise_toggle_changes_simulation_config() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MissionControlWindow(build_config(fast_mode=True))
+    try:
+        assert not window.chk_realistic_noise.isChecked()
+        window.chk_realistic_noise.setChecked(True)
+        window.start_sim()
+        app.processEvents()
+
+        assert window.worker is not None
+        assert window.worker.sim is not None
+        assert window.worker.sim.config.sensor.altitude_mode == "barometric_altitude"
+        assert window.worker.sim.config.sensor.speed_noise_std_m_s > 0.0
+        assert window.worker.sim.config.algorithm.min_profile_distance_m == 40.0
+        assert not window.chk_realistic_noise.isEnabled()
+    finally:
+        window.stop_sim()
+        if window.worker is not None:
+            window.worker.wait(2000)
+        window.close()
+
+
+def test_ui_realistic_noise_toggle_can_start_ideal_mode_from_realistic_cli_config() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MissionControlWindow(build_config(fast_mode=True, realistic_noise=True))
+    try:
+        assert window.chk_realistic_noise.isChecked()
+        window.chk_realistic_noise.setChecked(False)
+        window.start_sim()
+        app.processEvents()
+
+        assert window.worker is not None
+        assert window.worker.sim is not None
+        assert window.worker.sim.config.sensor.altitude_mode == "known_msl_altitude"
+        assert window.worker.sim.config.sensor.speed_noise_std_m_s == 0.0
+        assert window.worker.sim.config.algorithm.min_profile_distance_m == 0.0
+    finally:
+        window.stop_sim()
+        if window.worker is not None:
+            window.worker.wait(2000)
+        window.close()

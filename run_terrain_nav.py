@@ -4,7 +4,7 @@ import argparse
 from dataclasses import replace
 from pathlib import Path
 
-from terrain_nav.config import LocalizationConfig
+from terrain_nav.config import LocalizationConfig, apply_realistic_noise_mode
 from terrain_nav.logging_io import save_config, save_results
 from terrain_nav.simulation import SimulationEngine
 
@@ -33,6 +33,7 @@ def build_config(
     search_roi_size_px: int | None = None,
     start_row: int | None = None,
     start_col: int | None = None,
+    realistic_noise: bool = False,
 ) -> LocalizationConfig:
     config = LocalizationConfig()
     resolved_dem_path = _resolve_dem_path(dem_path, fast_mode)
@@ -66,7 +67,18 @@ def build_config(
     if fast_mode:
         route = replace(route, route_length_m=50.0)
 
-    return replace(config, terrain=terrain, route=route, algorithm=algorithm)
+    sensor = config.sensor
+    if realistic_noise:
+        base_config = replace(
+            config, terrain=terrain, route=route, sensor=sensor, algorithm=algorithm
+        )
+        return apply_realistic_noise_mode(
+            base_config,
+            True,
+            fast_synthetic=fast_mode and not resolved_dem_path,
+        )
+
+    return replace(config, terrain=terrain, route=route, sensor=sensor, algorithm=algorithm)
 
 
 def run_headless(**config_kwargs) -> None:
@@ -98,6 +110,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--search-roi-size", type=int, metavar="PX")
     parser.add_argument("--start-row", type=int, metavar="ROW")
     parser.add_argument("--start-col", type=int, metavar="COL")
+    parser.add_argument(
+        "--realistic-noise",
+        action="store_true",
+        help="Use barometric relative altitude and noisy speed measurements",
+    )
     return parser.parse_args()
 
 
@@ -110,6 +127,7 @@ def main() -> None:
         "search_roi_size_px": args.search_roi_size,
         "start_row": args.start_row,
         "start_col": args.start_col,
+        "realistic_noise": args.realistic_noise,
     }
     if args.headless:
         run_headless(**config_kwargs)

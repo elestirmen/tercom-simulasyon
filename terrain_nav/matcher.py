@@ -277,7 +277,7 @@ class ProfileMatcher:
         stride: int,
         search_bounds: Optional[Tuple[int, int, int, int]],
     ) -> List[Candidate]:
-        """Score a known-heading coarse grid in bulk using bounded RAM arrays."""
+        """Score a single-heading coarse grid in bulk using bounded RAM arrays."""
         rows, cols = self.dem.shape
         stride = max(1, int(stride))
         if search_bounds is None:
@@ -306,6 +306,21 @@ class ProfileMatcher:
         candidate_count = anchor_rows.size
         loss_sum = np.zeros(candidate_count, dtype=np.float64)
         valid_counts = np.zeros(candidate_count, dtype=np.uint16)
+        altitude_mode = self.config.sensor.altitude_mode
+        profile_terms = None
+        if altitude_mode != "known_msl_altitude":
+            term_count = candidate_count * len(laser_agl)
+            if term_count > 10_000_000:
+                return self.exhaustive_search(
+                    laser_agl,
+                    laser_valid,
+                    baro_msl,
+                    base_offsets,
+                    [heading_deg],
+                    stride=stride,
+                    search_bounds=search_bounds,
+                )
+            profile_terms = np.full((candidate_count, len(laser_agl)), np.nan, dtype=np.float64)
         pixel_offset_cache: Dict[float, np.ndarray] = {}
         pixel_offsets = self._pixel_offsets_for_heading(
             pixel_offset_cache,
@@ -347,27 +362,65 @@ class ProfileMatcher:
                 + self.dem[valid_rows + 1, valid_cols + 1] * col_fraction
             )
             sampled_dem = top * (1.0 - row_fraction) + bottom * row_fraction
-            error = laser_agl[measurement_index] - altitude_msl + sampled_dem
 
-            if loss_method == "mae":
-                loss = np.abs(error)
-            elif loss_method == "huber":
-                absolute_error = np.abs(error)
-                quadratic = np.minimum(absolute_error, huber_delta)
-                loss = 0.5 * quadratic**2 + huber_delta * (absolute_error - quadratic)
+            if altitude_mode == "known_msl_altitude":
+                error = laser_agl[measurement_index] - altitude_msl + sampled_dem
+                if loss_method == "mae":
+                    loss = np.abs(error)
+                elif loss_method == "huber":
+                    absolute_error = np.abs(error)
+                    quadratic = np.minimum(absolute_error, huber_delta)
+                    loss = 0.5 * quadratic**2 + huber_delta * (absolute_error - quadratic)
+                else:
+                    loss = error**2
+                loss_sum[indices] += loss
+            elif altitude_mode == "unknown_constant_msl_altitude":
+                profile_terms[indices, measurement_index] = (
+                    laser_agl[measurement_index] + sampled_dem
+                )
+            elif altitude_mode == "barometric_altitude":
+                profile_terms[indices, measurement_index] = (
+                    laser_agl[measurement_index] + sampled_dem - baro_msl[measurement_index]
+                )
             else:
-                loss = error**2
-            loss_sum[indices] += loss
+                raise ValueError(f"Unknown altitude mode: {altitude_mode}")
             valid_counts[indices] += 1
 
-        eligible = valid_counts >= self.config.algorithm.min_profile_length
+        minimum_valid_count = max(
+            self.config.algorithm.min_profile_length,
+            math.ceil(self.config.algorithm.min_match_valid_ratio * len(laser_agl)),
+        )
+        eligible = valid_counts >= minimum_valid_count
         if not np.any(eligible):
             return []
 
         scores = np.full(candidate_count, np.inf, dtype=np.float64)
-        scores[eligible] = loss_sum[eligible] / valid_counts[eligible]
-        if loss_method not in {"mae", "huber"}:
-            scores[eligible] = np.sqrt(scores[eligible])
+        estimated_msl_values = np.full(candidate_count, altitude_msl, dtype=np.float64)
+        if altitude_mode == "known_msl_altitude":
+            scores[eligible] = loss_sum[eligible] / valid_counts[eligible]
+            if loss_method not in {"mae", "huber"}:
+                scores[eligible] = np.sqrt(scores[eligible])
+        else:
+            eligible_indices = np.flatnonzero(eligible)
+            eligible_terms = profile_terms[eligible_indices]
+            reference_values = np.nanmedian(eligible_terms, axis=1)
+            errors = eligible_terms - reference_values[:, np.newaxis]
+            if loss_method == "mae":
+                loss_values = np.abs(errors)
+                score_values = np.nansum(loss_values, axis=1) / valid_counts[eligible_indices]
+            elif loss_method == "huber":
+                absolute_error = np.abs(errors)
+                quadratic = np.minimum(absolute_error, huber_delta)
+                loss_values = 0.5 * quadratic**2 + huber_delta * (absolute_error - quadratic)
+                score_values = np.nansum(loss_values, axis=1) / valid_counts[eligible_indices]
+            else:
+                loss_values = errors**2
+                score_values = np.sqrt(
+                    np.nansum(loss_values, axis=1) / valid_counts[eligible_indices]
+                )
+            scores[eligible_indices] = score_values
+            if altitude_mode == "unknown_constant_msl_altitude":
+                estimated_msl_values[eligible_indices] = reference_values
 
         eligible_indices = np.flatnonzero(eligible)
         order = np.lexsort((eligible_indices, scores[eligible_indices]))
@@ -378,7 +431,7 @@ class ProfileMatcher:
                 row=float(anchor_rows[index]),
                 col=float(anchor_cols[index]),
                 heading_deg=float(heading_deg),
-                estimated_msl_m=altitude_msl,
+                estimated_msl_m=float(estimated_msl_values[index]),
                 score=float(scores[index]),
                 valid_ratio=float(valid_counts[index]) / len(laser_agl),
                 metrics={},
@@ -471,7 +524,7 @@ class ProfileMatcher:
         search_bounds: Optional[Tuple[int, int, int, int]] = None,
     ) -> List[Candidate]:
         # 1. Coarse search
-        if self.config.sensor.altitude_mode == "known_msl_altitude" and len(search_headings) == 1:
+        if len(search_headings) == 1:
             coarse_cands = self._vectorized_known_altitude_search(
                 laser_agl,
                 laser_valid,

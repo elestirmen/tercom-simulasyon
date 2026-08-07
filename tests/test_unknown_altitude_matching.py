@@ -60,3 +60,27 @@ def test_huber_loss_outliers():
     assert math.isclose(best.estimated_msl_m, 1680.0)
     # For error=500, delta=10: loss = 0.5*100 + 10*490 = 4950. Mean over 4 is 1237.5.
     assert math.isclose(best.score, 1237.5)
+
+
+def test_barometric_altitude_estimates_unknown_absolute_bias():
+    laser = np.array([450.0, 480.0, 500.0, 540.0])
+    valid = np.array([True, True, True, True])
+    baro = np.array([1755.0, 1755.0, 1755.0, 1755.0])
+    dem = np.array(
+        [[1230.0, 1200.0, 1180.0, 1140.0, 1100.0], [1230.0, 1200.0, 1180.0, 1140.0, 1100.0]]
+    )
+    ct = CoordinateTransform(dx=1.0, dy=1.0)
+    offsets = [(0.0, 0.0, 90.0), (1.0, 0.0, 90.0), (2.0, 0.0, 90.0), (3.0, 0.0, 90.0)]
+
+    config = LocalizationConfig()
+    object.__setattr__(config.sensor, "altitude_mode", "barometric_altitude")
+    object.__setattr__(config.algorithm, "min_profile_length", 3)
+
+    matcher = ProfileMatcher(config, dem, ct)
+    cands = matcher.exhaustive_search(laser, valid, baro, offsets, search_headings=[90.0])
+
+    best = cands[0]
+    assert math.isclose(best.row, 0.0)
+    assert math.isclose(best.col, 0.0)
+    assert math.isclose(best.estimated_msl_m, 1680.0)
+    assert math.isclose(best.score, 0.0, abs_tol=1e-5)

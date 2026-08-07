@@ -16,6 +16,7 @@ class Measurement:
     baro_msl_m: float
     sensor_heading_deg: float
     traveled_distance_m: float
+    measured_speed_m_s: float | None = None
 
 
 class SensorSimulator:
@@ -27,6 +28,7 @@ class SensorSimulator:
 
         # Internal state
         self.baro_drift_m = 0.0
+        self.speed_drift_m_s = 0.0
 
     def step_barometer(self, true_msl_m: float, dt_s: float = 1.0) -> float:
         """Calculate next barometer reading."""
@@ -81,6 +83,36 @@ class SensorSimulator:
         measured = true_heading_deg + self.config.sensor_heading_bias_deg + noise
         return normalize_heading(measured)
 
+    def measure_traveled_distance(
+        self,
+        true_distance_m: float,
+        dt_s: float,
+    ) -> Tuple[float, float]:
+        """Measure speed and convert it back to the distance used by localization."""
+        if dt_s <= 0.0:
+            return true_distance_m, 0.0
+
+        true_speed_m_s = true_distance_m / dt_s
+        if (
+            self.config.speed_bias_m_s == 0.0
+            and self.config.speed_noise_std_m_s == 0.0
+            and self.config.speed_random_walk_std_m_s == 0.0
+        ):
+            return true_distance_m, true_speed_m_s
+
+        self.speed_drift_m_s += self.rng.normal(
+            loc=0.0,
+            scale=self.config.speed_random_walk_std_m_s * np.sqrt(dt_s),
+        )
+        measured_speed_m_s = (
+            true_speed_m_s
+            + self.config.speed_bias_m_s
+            + self.speed_drift_m_s
+            + self.rng.normal(loc=0.0, scale=self.config.speed_noise_std_m_s)
+        )
+        measured_speed_m_s = max(0.0, float(measured_speed_m_s))
+        return measured_speed_m_s * dt_s, measured_speed_m_s
+
     def generate_measurement(
         self,
         true_msl_m: float,
@@ -92,11 +124,16 @@ class SensorSimulator:
         baro = self.step_barometer(true_msl_m, dt_s)
         laser, valid = self.measure_laser(true_msl_m, terrain_elevation_m)
         heading = self.measure_heading(true_heading_deg)
+        measured_distance, measured_speed = self.measure_traveled_distance(
+            traveled_distance_m,
+            dt_s,
+        )
 
         return Measurement(
             laser_agl_m=laser,
             laser_valid=valid,
             baro_msl_m=baro,
             sensor_heading_deg=heading,
-            traveled_distance_m=traveled_distance_m,
+            traveled_distance_m=measured_distance,
+            measured_speed_m_s=measured_speed,
         )

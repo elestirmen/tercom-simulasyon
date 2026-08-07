@@ -1,6 +1,6 @@
 """Configuration classes for terrain navigation simulation."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 
 @dataclass(frozen=True)
@@ -66,11 +66,18 @@ class SensorConfig:
     sensor_heading_noise_std_deg: float = 1.0
     heading_uncertainty_deg: float = 5.0
 
+    # Speed sensor / odometry. The simulator moves with the commanded true
+    # distance, while localization receives this measured distance.
+    speed_bias_m_s: float = 0.0
+    speed_noise_std_m_s: float = 0.0
+    speed_random_walk_std_m_s: float = 0.0
+
 
 @dataclass(frozen=True)
 class AlgorithmConfig:
     top_k: int = 5
     min_profile_length: int = 10
+    min_profile_distance_m: float = 0.0
 
     # Coarse to fine
     coarse_stride: int = 10
@@ -106,3 +113,70 @@ class LocalizationConfig:
     route: RouteConfig = field(default_factory=RouteConfig)
     sensor: SensorConfig = field(default_factory=SensorConfig)
     algorithm: AlgorithmConfig = field(default_factory=AlgorithmConfig)
+
+
+def uses_realistic_noise_mode(config: LocalizationConfig) -> bool:
+    """Return whether the config has the realistic sensor-noise preset enabled."""
+    return (
+        config.sensor.altitude_mode == "barometric_altitude"
+        and config.sensor.speed_noise_std_m_s > 0.0
+    )
+
+
+def apply_realistic_noise_mode(
+    config: LocalizationConfig,
+    enabled: bool,
+    *,
+    fast_synthetic: bool | None = None,
+) -> LocalizationConfig:
+    """Apply or remove the realistic sensor-noise preset while preserving map/route settings."""
+    if fast_synthetic is None:
+        fast_synthetic = (
+            not config.terrain.dem_path
+            and config.terrain.rows <= 100
+            and config.terrain.cols <= 100
+        )
+
+    if enabled:
+        min_profile_distance_m = 40.0 if fast_synthetic else 400.0
+        return replace(
+            config,
+            sensor=replace(
+                config.sensor,
+                altitude_mode="barometric_altitude",
+                baro_bias_m=75.0,
+                baro_noise_std_m=2.0,
+                baro_drift_rate_m_s=0.0,
+                baro_random_walk_std_m=0.03,
+                speed_bias_m_s=0.0,
+                speed_noise_std_m_s=0.25,
+                speed_random_walk_std_m_s=0.03,
+            ),
+            algorithm=replace(
+                config.algorithm,
+                min_profile_length=5,
+                min_profile_distance_m=min_profile_distance_m,
+            ),
+        )
+
+    default_sensor = SensorConfig()
+    default_algorithm = AlgorithmConfig()
+    return replace(
+        config,
+        sensor=replace(
+            config.sensor,
+            altitude_mode=default_sensor.altitude_mode,
+            baro_bias_m=default_sensor.baro_bias_m,
+            baro_noise_std_m=default_sensor.baro_noise_std_m,
+            baro_drift_rate_m_s=default_sensor.baro_drift_rate_m_s,
+            baro_random_walk_std_m=default_sensor.baro_random_walk_std_m,
+            speed_bias_m_s=default_sensor.speed_bias_m_s,
+            speed_noise_std_m_s=default_sensor.speed_noise_std_m_s,
+            speed_random_walk_std_m_s=default_sensor.speed_random_walk_std_m_s,
+        ),
+        algorithm=replace(
+            config.algorithm,
+            min_profile_length=default_algorithm.min_profile_length,
+            min_profile_distance_m=default_algorithm.min_profile_distance_m,
+        ),
+    )

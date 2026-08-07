@@ -124,7 +124,7 @@ def test_realistic_noise_config_uses_barometric_altitude_and_noisy_speed():
     assert config.sensor.speed_noise_std_m_s > 0.0
     assert config.algorithm.min_profile_distance_m == 40.0
     assert config.algorithm.max_profile_distance_m == 0.0
-    assert config.algorithm.max_match_inlier_rmse_m == 4.0
+    assert config.algorithm.max_match_inlier_rmse_m == 5.0
     assert config.algorithm.max_match_jump_m == 50.0
     assert config.algorithm.min_profile_length == 5
     assert config.sensor.heading_mode == "known_heading"

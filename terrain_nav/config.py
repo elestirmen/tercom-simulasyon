@@ -162,7 +162,7 @@ def apply_realistic_noise_mode(
                 min_profile_length=5,
                 min_profile_distance_m=min_profile_distance_m,
                 max_profile_distance_m=max_profile_distance_m,
-                max_match_inlier_rmse_m=4.0,
+                max_match_inlier_rmse_m=5.0,
                 max_match_jump_m=50.0,
             ),
         )

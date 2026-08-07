@@ -37,24 +37,38 @@ class LocalizationEngine:
         self.last_rejection_reason: Optional[str] = None
         self.last_rejected_score: Optional[float] = None
 
+    def _drop_oldest_measurement(self) -> None:
+        """Remove the oldest sample and keep the profile-start anchor aligned."""
+        self.measurements.pop(0)
+        if self.last_match_pixel is not None and self.measurements:
+            # Each measurement stores the motion that ended at that sample.
+            # After removing the oldest sample, advance the anchor with the
+            # motion attached to the new oldest sample.
+            new_oldest = self.measurements[0]
+            d_row, d_col = self.ct.offset_pixels(
+                new_oldest.traveled_distance_m,
+                new_oldest.sensor_heading_deg,
+            )
+            self.last_match_pixel = (
+                self.last_match_pixel[0] + d_row,
+                self.last_match_pixel[1] + d_col,
+            )
+
     def add_measurement(self, m: Measurement):
         self.measurements.append(m)
 
-        if len(self.measurements) > self.config.algorithm.profile_window_size:
-            self.measurements.pop(0)
-            if self.last_match_pixel is not None:
-                # Each measurement stores the motion that ended at that sample.
-                # After removing the oldest sample, advance the anchor with the
-                # motion attached to the new oldest sample.
-                new_oldest = self.measurements[0]
-                d_row, d_col = self.ct.offset_pixels(
-                    new_oldest.traveled_distance_m,
-                    new_oldest.sensor_heading_deg,
-                )
-                self.last_match_pixel = (
-                    self.last_match_pixel[0] + d_row,
-                    self.last_match_pixel[1] + d_col,
-                )
+        algorithm = self.config.algorithm
+        max_measurements = max(0, int(algorithm.profile_window_size))
+        while len(self.measurements) > max_measurements:
+            self._drop_oldest_measurement()
+
+        max_profile_distance_m = float(algorithm.max_profile_distance_m)
+        while (
+            max_profile_distance_m > 0.0
+            and len(self.measurements) > algorithm.min_profile_length
+            and self._profile_distance_m() > max_profile_distance_m
+        ):
+            self._drop_oldest_measurement()
 
         self._recompute_offsets()
 

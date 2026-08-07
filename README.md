@@ -38,10 +38,12 @@ Arayüzdeki `Gerçekçi sensör gürültüsü` seçeneği, simülasyon başlamad
 
 - Tam kaynak harita; İHA uçuşunun, sensör örneklemesinin ve lokalizasyonun ortak
   kapsamıdır. İHA yalnızca gerçek kaynak harita sınırında durdurulur.
-- İlk güvenilir eşleşme bulunana kadar profil bütün haritada aranır.
-- Turuncu ROI, güvenilir eşleşmeden sonra kullanılan hızlı yerel arama alanıdır.
-- Eşleşme kaybolursa ROI kademeli büyür; eski ankraj geçersiz olduğunda sistem
-  ölçüm profilini koruyarak yeniden bütün haritada arama yapar.
+- Varsayılan olarak profil her adımda bütün haritada aranır; yerel ROI yalnızca
+  `--search-roi-size` sıfırdan büyük verildiğinde hız optimizasyonu olarak açılır.
+- Turuncu ROI, bu seçenek açıkken güvenilir eşleşmeden sonra kullanılan yerel
+  arama alanıdır.
+- ROI açıkken eşleşme kaybolursa arama alanı kademeli büyür; eski ankraj geçersiz
+  olduğunda sistem ölçüm profilini koruyarak yeniden bütün haritada arama yapar.
 - Manuel dönüşlerde her ölçüm, kendisine ulaşan hareket vektörüyle profile
   eklenir; böylece L ve zikzak rotaların geometrisi korunur.
 - Inlier RMSE, inlier korelasyonu veya geçerli örnek oranı yetersiz bir aday
@@ -53,6 +55,7 @@ Dış DEM'in tamamı, uzun kenarı varsayılan olarak 2048 hücre olacak şekild
 yeniden örneklenir. Böylece bellek kullanımı sınırlı kalırken haritanın hiçbir
 bölümü lokalizasyon dışında bırakılmaz. `--dem-target-size` ve
 `--search-roi-size` seçenekleri çözünürlük ile yerel ROI boyutunu kontrol eder.
+`--search-roi-size 0` ve varsayılan ayar ROI'yi kapatır.
 
 ## Sensör modları
 
@@ -64,9 +67,11 @@ bilgisiyle çalışır.
 varsayımlarıyla çalıştırır: mutlak MSL irtifa doğrudan bilinmez, barometrede
 sabit bilinmeyen bias ve gürültü vardır, lokalizasyona verilen hareket mesafesi
 ise gürültülü hız ölçümünden türetilir. Bu mod, kısa profille yanlış global
-eşleşmeye kilitlenmemek için varsayılan olarak en az 400 metre ölçülmüş profil
-uzunluğu bekler. Pusula bu modda da bilinen yön olarak kalır; heading gürültüsü
-ayrıca `SensorConfig.heading_mode` üzerinden ayarlanabilir.
+eşleşmeye kilitlenmemek için dış DEM koşularında varsayılan olarak en az
+800 metre ölçülmüş profil uzunluğu bekler ve hız gürültüsünün çok uzun profilde
+birikmesini azaltmak için kayan profili yaklaşık 2 km ile sınırlar. Pusula bu
+modda da bilinen yön olarak kalır; heading gürültüsü ayrıca
+`SensorConfig.heading_mode` üzerinden ayarlanabilir.
 
 ## Yapı
 

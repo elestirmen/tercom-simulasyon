@@ -111,6 +111,7 @@ def test_vectorized_coarse_scores_match_scalar_losses():
 
             assert (vectorized.row, vectorized.col) == (scalar.row, scalar.col)
             assert np.isclose(vectorized.score, scalar.score)
+            assert np.isclose(vectorized.estimated_msl_m, scalar.estimated_msl_m)
 
 
 def test_realistic_noise_config_uses_barometric_altitude_and_noisy_speed():
@@ -122,6 +123,9 @@ def test_realistic_noise_config_uses_barometric_altitude_and_noisy_speed():
     assert config.sensor.baro_bias_m != 0.0
     assert config.sensor.speed_noise_std_m_s > 0.0
     assert config.algorithm.min_profile_distance_m == 40.0
+    assert config.algorithm.max_profile_distance_m == 0.0
+    assert config.algorithm.max_match_inlier_rmse_m == 4.0
+    assert config.algorithm.max_match_jump_m == 50.0
     assert config.algorithm.min_profile_length == 5
     assert config.sensor.heading_mode == "known_heading"
 
@@ -133,6 +137,7 @@ def test_default_config_keeps_idealized_known_altitude_mode():
 
     assert config.sensor.altitude_mode == "known_msl_altitude"
     assert config.sensor.speed_noise_std_m_s == 0.0
+    assert config.algorithm.search_roi_size_px == 0
 
 
 def test_measured_speed_distance_is_used_for_profile_offsets():
@@ -207,6 +212,29 @@ def test_profile_anchor_follows_removed_measurement_motion():
     engine.add_measurement(Measurement(100.0, True, 1000.0, 90.0, 10.0))
 
     assert np.allclose(engine.last_match_pixel, (50.0, 60.0))
+
+
+def test_distance_limited_profile_window_keeps_anchor_aligned():
+    config = LocalizationConfig()
+    object.__setattr__(config.algorithm, "min_profile_length", 2)
+    object.__setattr__(config.algorithm, "profile_window_size", 10)
+    object.__setattr__(config.algorithm, "max_profile_distance_m", 25.0)
+    engine = LocalizationEngine(
+        config,
+        np.zeros((100, 100), dtype=np.float32),
+        CoordinateTransform(1.0, 1.0),
+    )
+    engine.last_match_pixel = (50.0, 50.0)
+
+    engine.add_measurement(Measurement(100.0, True, 1000.0, 90.0, 0.0))
+    engine.add_measurement(Measurement(100.0, True, 1000.0, 90.0, 10.0))
+    engine.add_measurement(Measurement(100.0, True, 1000.0, 90.0, 10.0))
+    engine.add_measurement(Measurement(100.0, True, 1000.0, 90.0, 10.0))
+
+    assert len(engine.measurements) == 3
+    assert engine._profile_distance_m() == 20.0
+    assert np.allclose(engine.last_match_pixel, (50.0, 60.0))
+    assert np.allclose(engine.relative_offsets[-1][:2], (20.0, 0.0))
 
 
 def test_profile_offsets_use_motion_into_each_current_measurement():
@@ -322,6 +350,27 @@ def test_search_status_distinguishes_global_search_from_local_roi():
     assert local["phase"] == "tracking"
     assert local["bounds"] == (40, 60, 50, 70)
     assert local["draw_bounds"] == local["bounds"]
+
+
+def test_default_no_roi_keeps_global_search_after_fix():
+    config = LocalizationConfig()
+    object.__setattr__(config.algorithm, "min_profile_length", 1)
+    engine = LocalizationEngine(
+        config,
+        np.zeros((100, 120), dtype=np.float32),
+        CoordinateTransform(1.0, 1.0),
+    )
+    engine.add_measurement(Measurement(100.0, True, 1000.0, 0.0, 0.0))
+    engine.matcher.coarse_to_fine_search = lambda *args, **kwargs: [
+        Candidate(50.0, 60.0, 0.0, 1000.0, 1.0, 1.0, {})
+    ]
+
+    assert engine.localize(0.0) is not None
+    status = engine.get_search_status()
+    assert status["mode"] == "global_search"
+    assert status["phase"] == "tracking"
+    assert status["draw_bounds"] is None
+    assert status["has_anchor"]
 
 
 def test_full_roi_failure_drops_stale_anchor_and_reacquires_globally():

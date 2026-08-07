@@ -78,6 +78,9 @@ class AlgorithmConfig:
     top_k: int = 5
     min_profile_length: int = 10
     min_profile_distance_m: float = 0.0
+    # Optional measured profile span cap. Zero leaves the count-based window as
+    # the only limit.
+    max_profile_distance_m: float = 0.0
 
     # Coarse to fine
     coarse_stride: int = 10
@@ -101,7 +104,7 @@ class AlgorithmConfig:
     profile_window_size: int = 100  # How many past measurements to use
     # After the first reliable match, restrict the next search around it.
     # Zero disables the optimization and keeps a global search every step.
-    search_roi_size_px: int = 512
+    search_roi_size_px: int = 0
     # Maximum physically plausible correction of the profile-start anchor.
     # Set to zero to disable motion-continuity gating.
     max_match_jump_m: float = 10.0
@@ -138,7 +141,8 @@ def apply_realistic_noise_mode(
         )
 
     if enabled:
-        min_profile_distance_m = 40.0 if fast_synthetic else 400.0
+        min_profile_distance_m = 40.0 if fast_synthetic else 800.0
+        max_profile_distance_m = 0.0 if fast_synthetic else 2000.0
         return replace(
             config,
             sensor=replace(
@@ -156,6 +160,9 @@ def apply_realistic_noise_mode(
                 config.algorithm,
                 min_profile_length=5,
                 min_profile_distance_m=min_profile_distance_m,
+                max_profile_distance_m=max_profile_distance_m,
+                max_match_inlier_rmse_m=4.0,
+                max_match_jump_m=50.0,
             ),
         )
 
@@ -178,5 +185,8 @@ def apply_realistic_noise_mode(
             config.algorithm,
             min_profile_length=default_algorithm.min_profile_length,
             min_profile_distance_m=default_algorithm.min_profile_distance_m,
+            max_profile_distance_m=default_algorithm.max_profile_distance_m,
+            max_match_inlier_rmse_m=default_algorithm.max_match_inlier_rmse_m,
+            max_match_jump_m=default_algorithm.max_match_jump_m,
         ),
     )

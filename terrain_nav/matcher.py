@@ -421,6 +421,14 @@ class ProfileMatcher:
             scores[eligible_indices] = score_values
             if altitude_mode == "unknown_constant_msl_altitude":
                 estimated_msl_values[eligible_indices] = reference_values
+            elif altitude_mode == "barometric_altitude":
+                valid_terms = ~np.isnan(eligible_terms)
+                baro_terms = np.where(
+                    valid_terms,
+                    baro_msl[np.newaxis, :] + reference_values[:, np.newaxis],
+                    np.nan,
+                )
+                estimated_msl_values[eligible_indices] = np.nanmean(baro_terms, axis=1)
 
         eligible_indices = np.flatnonzero(eligible)
         order = np.lexsort((eligible_indices, scores[eligible_indices]))

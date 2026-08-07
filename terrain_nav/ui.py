@@ -1,23 +1,37 @@
 """PySide6 UI for Terrain Navigation."""
 
 import sys
+from pathlib import Path
 from queue import Empty, Queue
 
 from PySide6.QtCore import QEvent, Qt, QThread, Signal
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QCheckBox,
     QFormLayout,
     QGroupBox,
+    QHeaderView,
     QLabel,
     QMainWindow,
     QPushButton,
     QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
+from terrain_nav.benchmark import (
+    BenchmarkResult,
+    benchmark_overview_rows,
+    benchmark_route_summary_rows,
+    benchmark_variant_summary_rows,
+    format_benchmark_summary,
+    run_benchmark_suite,
+)
 from terrain_nav.config import (
     LocalizationConfig,
     apply_realistic_noise_mode,
@@ -75,12 +89,48 @@ QPushButton#btnStop {
 QPushButton#btnStop:hover {
     background-color: #eba0ac;
 }
+QPushButton#btnBenchmark {
+    background-color: #89b4fa;
+    color: #11111b;
+}
+QPushButton#btnBenchmark:hover {
+    background-color: #74c7ec;
+}
 QTextEdit {
     background-color: #11111b;
     color: #a6e3a1;
     font-family: 'Consolas', monospace;
     border: 1px solid #45475a;
     border-radius: 4px;
+}
+QTableWidget {
+    background-color: #11111b;
+    alternate-background-color: #181825;
+    color: #cdd6f4;
+    gridline-color: #313244;
+    border: 1px solid #45475a;
+    border-radius: 4px;
+}
+QHeaderView::section {
+    background-color: #313244;
+    color: #cdd6f4;
+    border: 1px solid #45475a;
+    padding: 4px;
+    font-weight: bold;
+}
+QTabWidget::pane {
+    border: 1px solid #45475a;
+    border-radius: 4px;
+}
+QTabBar::tab {
+    background-color: #313244;
+    color: #cdd6f4;
+    padding: 6px 8px;
+    border: 1px solid #45475a;
+}
+QTabBar::tab:selected {
+    background-color: #45475a;
+    color: #89b4fa;
 }
 QLabel#metricLabel {
     font-size: 18px;
@@ -175,6 +225,34 @@ class SimulationWorker(QThread):
         self._commands.put(("move", relative_heading_deg))
 
 
+class BenchmarkWorker(QThread):
+    progress = Signal(str)
+    finished_benchmark = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, config: LocalizationConfig, output_dir: Path):
+        super().__init__()
+        self.config = config
+        self.output_dir = output_dir
+        self._stop_requested = False
+
+    def run(self):
+        try:
+            result = run_benchmark_suite(
+                self.config,
+                progress_callback=self.progress.emit,
+                stop_requested=lambda: self._stop_requested,
+                output_dir=self.output_dir,
+            )
+        except Exception as exc:  # pragma: no cover - surfaced in the GUI
+            self.failed.emit(str(exc))
+            return
+        self.finished_benchmark.emit(result)
+
+    def stop(self):
+        self._stop_requested = True
+
+
 class MissionControlWindow(QMainWindow):
     def __init__(self, config=None):
         super().__init__()
@@ -221,6 +299,8 @@ class MissionControlWindow(QMainWindow):
         self.btn_start.setObjectName("btnStart")
         self.btn_stop = QPushButton("Acil Durdurma")
         self.btn_stop.setObjectName("btnStop")
+        self.btn_benchmark = QPushButton("Benchmark Modu")
+        self.btn_benchmark.setObjectName("btnBenchmark")
         self.chk_realistic_noise = QCheckBox("Gerçekçi sensör gürültüsü")
         self.chk_realistic_noise.setChecked(uses_realistic_noise_mode(incoming_config))
         self.chk_realistic_noise.setToolTip(
@@ -229,9 +309,11 @@ class MissionControlWindow(QMainWindow):
 
         self.btn_start.clicked.connect(self.start_sim)
         self.btn_stop.clicked.connect(self.stop_sim)
+        self.btn_benchmark.clicked.connect(self.start_benchmark)
 
         ctrl_layout.addWidget(self.chk_realistic_noise)
         ctrl_layout.addWidget(self.btn_start)
+        ctrl_layout.addWidget(self.btn_benchmark)
         ctrl_layout.addWidget(self.btn_stop)
         self.lbl_controls = QLabel(
             f"W ileri / S geri / A sol / D sağ "
@@ -314,6 +396,27 @@ class MissionControlWindow(QMainWindow):
 
         telemetry_group.setLayout(tel_layout)
         sidebar_layout.addWidget(telemetry_group)
+
+        benchmark_group = QGroupBox("Benchmark Sonucu")
+        benchmark_layout = QVBoxLayout()
+        self.lbl_benchmark = QLabel("Benchmark bekleniyor")
+        self.lbl_benchmark.setObjectName("titleLabel")
+        self.lbl_benchmark.setWordWrap(True)
+        benchmark_layout.addWidget(self.lbl_benchmark)
+        self.benchmark_tabs = QTabWidget()
+        self.benchmark_overview_table = self._create_benchmark_table(["Ölçüt", "Değer"])
+        self.benchmark_variant_table = self._create_benchmark_table(
+            ["Vektör", "Mod", "N", "Fix", "Yanlış", "Medyan", "P95", "Süre"]
+        )
+        self.benchmark_route_table = self._create_benchmark_table(
+            ["Rota", "Fix", "Yanlış", "En iyi", "Medyan", "P95", "Süre"]
+        )
+        self.benchmark_tabs.addTab(self.benchmark_overview_table, "Özet")
+        self.benchmark_tabs.addTab(self.benchmark_variant_table, "Vektör")
+        self.benchmark_tabs.addTab(self.benchmark_route_table, "Rota")
+        benchmark_layout.addWidget(self.benchmark_tabs)
+        benchmark_group.setLayout(benchmark_layout)
+        sidebar_layout.addWidget(benchmark_group)
         sidebar_layout.addStretch()
 
         self.sidebar_widget = QWidget()
@@ -335,6 +438,7 @@ class MissionControlWindow(QMainWindow):
         main_layout.addWidget(self.log_text)
 
         self.worker = None
+        self.benchmark_worker = None
         self.true_path = []
         self.est_path = []
         self._app = QApplication.instance()
@@ -345,6 +449,102 @@ class MissionControlWindow(QMainWindow):
         lbl = QLabel(text)
         lbl.setObjectName("titleLabel")
         return lbl
+
+    def _create_benchmark_table(self, headers: list[str]) -> QTableWidget:
+        table = QTableWidget(0, len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.setAlternatingRowColors(True)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setMinimumHeight(170)
+        table.verticalHeader().setVisible(False)
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        header.setStretchLastSection(True)
+        return table
+
+    def _populate_benchmark_table(
+        self,
+        table: QTableWidget,
+        rows: list[list[object]],
+    ) -> None:
+        table.setRowCount(len(rows))
+        for row_index, row_values in enumerate(rows):
+            for col_index, value in enumerate(row_values):
+                item = QTableWidgetItem(self._format_table_value(value))
+                if isinstance(value, (int, float)):
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                table.setItem(row_index, col_index, item)
+        table.resizeRowsToContents()
+
+    @staticmethod
+    def _format_table_value(value: object) -> str:
+        if value is None:
+            return "-"
+        if isinstance(value, float):
+            return f"{value:.1f}" if abs(value) >= 10.0 else f"{value:.2f}"
+        return str(value)
+
+    @staticmethod
+    def _format_count_rate(count: object, total: object, rate: object) -> str:
+        rate_text = "-"
+        if isinstance(rate, (int, float)):
+            rate_text = f"{float(rate):.0f}%"
+        return f"{count}/{total} ({rate_text})"
+
+    def _clear_benchmark_tables(self) -> None:
+        for table in (
+            self.benchmark_overview_table,
+            self.benchmark_variant_table,
+            self.benchmark_route_table,
+        ):
+            table.setRowCount(0)
+
+    def _update_benchmark_tables(self, result: BenchmarkResult) -> None:
+        overview_rows = [
+            [row["metric"], row["value"]]
+            for row in benchmark_overview_rows(result)
+        ]
+        self._populate_benchmark_table(self.benchmark_overview_table, overview_rows)
+
+        variant_rows = []
+        for row in benchmark_variant_summary_rows(result):
+            variant_rows.append(
+                [
+                    row["variant"],
+                    row["mode"],
+                    row["points"],
+                    self._format_count_rate(row["fix_count"], row["runs"], row["fix_rate_pct"]),
+                    self._format_count_rate(
+                        row["wrong_fix_count"],
+                        row["runs"],
+                        row["wrong_fix_rate_pct"],
+                    ),
+                    row["median_error_m"],
+                    row["p95_error_m"],
+                    row["mean_elapsed_ms"],
+                ]
+            )
+        self._populate_benchmark_table(self.benchmark_variant_table, variant_rows)
+
+        route_rows = []
+        for row in benchmark_route_summary_rows(result):
+            route_rows.append(
+                [
+                    row["route"],
+                    self._format_count_rate(row["fix_count"], row["runs"], row["fix_rate_pct"]),
+                    self._format_count_rate(
+                        row["wrong_fix_count"],
+                        row["runs"],
+                        row["wrong_fix_rate_pct"],
+                    ),
+                    row["best_variant"],
+                    row["median_error_m"],
+                    row["p95_error_m"],
+                    row["mean_elapsed_ms"],
+                ]
+            )
+        self._populate_benchmark_table(self.benchmark_route_table, route_rows)
 
     @staticmethod
     def _format_extent(width_m: float, height_m: float) -> str:
@@ -441,9 +641,12 @@ class MissionControlWindow(QMainWindow):
     def start_sim(self):
         if self.worker is not None and self.worker.isRunning():
             return
+        if self.benchmark_worker is not None and self.benchmark_worker.isRunning():
+            return
 
         self.log_text.append("[SYSTEM] Simülasyon başlatılıyor...")
         self.chk_realistic_noise.setEnabled(False)
+        self.btn_benchmark.setEnabled(False)
 
         # Reset paths
         self.true_path = []
@@ -482,9 +685,96 @@ class MissionControlWindow(QMainWindow):
         )
 
     def stop_sim(self):
-        if self.worker:
+        if self.worker and self.worker.isRunning():
             self.worker.stop()
             self.log_text.append("[SYSTEM] Simülasyon iptal edildi.")
+        if self.benchmark_worker is not None and self.benchmark_worker.isRunning():
+            self.benchmark_worker.stop()
+            self.log_text.append("[BENCH] Benchmark durduruluyor.")
+
+    def start_benchmark(self):
+        if self.benchmark_worker is not None and self.benchmark_worker.isRunning():
+            return
+
+        if self.worker is not None and self.worker.isRunning():
+            self.worker.stop()
+            self.worker.wait(1500)
+
+        config = self._simulation_config()
+        self.log_text.append("[BENCH] Kapsamlı benchmark modu başlatılıyor...")
+        self.chk_realistic_noise.setEnabled(False)
+        self.btn_start.setEnabled(False)
+        self.btn_benchmark.setEnabled(False)
+        self.lbl_benchmark.setText("Kapsamlı benchmark çalışıyor...")
+        self._clear_benchmark_tables()
+        self.true_path = []
+        self.est_path = []
+        self.profile_canvas.clear_profile()
+
+        preview = SimulationEngine(config, manual_control=True)
+        try:
+            self.map_canvas.plot_terrain(preview.terrain)
+            self._update_scope_status(preview)
+        finally:
+            preview.close()
+
+        self.benchmark_worker = BenchmarkWorker(config, Path.cwd() / "results")
+        self.benchmark_worker.progress.connect(self.on_benchmark_progress)
+        self.benchmark_worker.finished_benchmark.connect(self.on_benchmark_finished)
+        self.benchmark_worker.failed.connect(self.on_benchmark_failed)
+        self.benchmark_worker.start()
+
+    def on_benchmark_progress(self, message: str) -> None:
+        self.log_text.append(message)
+        scrollbar = self.log_text.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def on_benchmark_finished(self, result: BenchmarkResult) -> None:
+        self.chk_realistic_noise.setEnabled(True)
+        self.btn_start.setEnabled(True)
+        self.btn_benchmark.setEnabled(True)
+        self.benchmark_worker = None
+        summary_text = format_benchmark_summary(result)
+        self.lbl_benchmark.setText(summary_text)
+        self._update_benchmark_tables(result)
+        self.log_text.append("[BENCH] Benchmark tamamlandı.")
+
+        if result.best_profile is not None:
+            self.profile_canvas.update_profile(result.best_profile)
+
+        route_name = self._benchmark_display_route(result)
+        if route_name is not None:
+            self.true_path = result.route_paths[route_name]
+            self.est_path = []
+            self.map_canvas.update_search_roi(None)
+            self.map_canvas.update_trajectory(
+                self.true_path,
+                self.est_path,
+                true_heading_deg=result.route_headings.get(route_name),
+            )
+
+        scrollbar = self.log_text.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def on_benchmark_failed(self, message: str) -> None:
+        self.chk_realistic_noise.setEnabled(True)
+        self.btn_start.setEnabled(True)
+        self.btn_benchmark.setEnabled(True)
+        self.benchmark_worker = None
+        self.lbl_benchmark.setText(f"Benchmark hata verdi: {message}")
+        self.log_text.append(f"[BENCH] Hata: {message}")
+
+    @staticmethod
+    def _benchmark_display_route(result: BenchmarkResult) -> str | None:
+        fixed = [
+            summary
+            for summary in result.summaries
+            if summary.fix_accepted and summary.position_error_m is not None
+        ]
+        if fixed:
+            best = min(fixed, key=lambda summary: summary.position_error_m or float("inf"))
+            return best.route_name
+        return next(iter(result.route_paths), None)
 
     def on_state_changed(self, true_state):
         """Refresh truth telemetry immediately after Q/E without a sample."""
@@ -508,6 +798,9 @@ class MissionControlWindow(QMainWindow):
         if self.worker is not None and self.worker.isRunning():
             self.worker.stop()
             self.worker.wait(1500)
+        if self.benchmark_worker is not None and self.benchmark_worker.isRunning():
+            self.benchmark_worker.stop()
+            self.benchmark_worker.wait(1500)
         super().closeEvent(event)
 
     def on_step(self, step_idx, true_state, est_state, measurement):
@@ -602,6 +895,10 @@ class MissionControlWindow(QMainWindow):
 
     def on_finished(self):
         self.chk_realistic_noise.setEnabled(True)
+        benchmark_running = (
+            self.benchmark_worker is not None and self.benchmark_worker.isRunning()
+        )
+        self.btn_benchmark.setEnabled(not benchmark_running)
         if self.worker is not None and self.worker.stopped_by_user:
             return
         self.log_text.append("[SYSTEM] Simülasyon tamamlandı.")

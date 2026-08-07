@@ -29,6 +29,11 @@ def test_ui_starts_with_active_map_scope_and_heading_arrow() -> None:
         assert window.main_splitter.orientation() == Qt.Horizontal
         assert window.main_splitter.handleWidth() == 8
         assert window.profile_group.minimumWidth() == 280
+        assert window.btn_benchmark.text() == "Benchmark Modu"
+        assert not window.btn_benchmark.isEnabled()
+        assert "Benchmark" in window.lbl_benchmark.text()
+        assert window.benchmark_tabs.count() == 3
+        assert window.benchmark_variant_table.columnCount() == 8
         assert "Yükseklik profili" in window.profile_canvas.axes.get_title()
         assert window.lbl_true_pos.text() != "-"
     finally:

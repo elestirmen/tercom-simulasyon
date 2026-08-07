@@ -1,6 +1,7 @@
 """PySide6 UI for Terrain Navigation."""
 
 import sys
+from dataclasses import replace
 from pathlib import Path
 from queue import Empty, Queue
 
@@ -9,6 +10,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
+    QComboBox,
     QFormLayout,
     QGroupBox,
     QHeaderView,
@@ -33,6 +35,9 @@ from terrain_nav.benchmark import (
     run_benchmark_suite,
 )
 from terrain_nav.config import (
+    MOTION_MODE_KNOWN_DISTANCE,
+    MOTION_MODE_MEASURED_SPEED,
+    MOTION_MODE_UNKNOWN_CONSTANT_SPEED,
     LocalizationConfig,
     apply_realistic_noise_mode,
     uses_realistic_noise_mode,
@@ -102,6 +107,13 @@ QTextEdit {
     font-family: 'Consolas', monospace;
     border: 1px solid #45475a;
     border-radius: 4px;
+}
+QComboBox {
+    background-color: #313244;
+    color: #cdd6f4;
+    border: 1px solid #45475a;
+    border-radius: 4px;
+    padding: 6px;
 }
 QTableWidget {
     background-color: #11111b;
@@ -306,12 +318,26 @@ class MissionControlWindow(QMainWindow):
         self.chk_realistic_noise.setToolTip(
             "Barometre bias/gürültüsü ve hız ölçüm sapmasını etkinleştirir."
         )
+        self.cmb_motion_mode = QComboBox()
+        self.cmb_motion_mode.addItem("Bilinen mesafe", MOTION_MODE_KNOWN_DISTANCE)
+        self.cmb_motion_mode.addItem("Ölçülen hız", MOTION_MODE_MEASURED_SPEED)
+        self.cmb_motion_mode.addItem(
+            "Hız bilinmiyor (DEM ile tahmin)",
+            MOTION_MODE_UNKNOWN_CONSTANT_SPEED,
+        )
+        initial_motion_index = self.cmb_motion_mode.findData(incoming_config.motion_mode)
+        self.cmb_motion_mode.setCurrentIndex(max(0, initial_motion_index))
+        self.cmb_motion_mode.setToolTip(
+            "Lokalizasyon algoritmasına sağlanan hareket bilgisini seçer."
+        )
 
         self.btn_start.clicked.connect(self.start_sim)
         self.btn_stop.clicked.connect(self.stop_sim)
         self.btn_benchmark.clicked.connect(self.start_benchmark)
 
         ctrl_layout.addWidget(self.chk_realistic_noise)
+        ctrl_layout.addWidget(self._create_title("Hareket bilgisi:"))
+        ctrl_layout.addWidget(self.cmb_motion_mode)
         ctrl_layout.addWidget(self.btn_start)
         ctrl_layout.addWidget(self.btn_benchmark)
         ctrl_layout.addWidget(self.btn_stop)
@@ -378,6 +404,12 @@ class MissionControlWindow(QMainWindow):
         self.lbl_spread = QLabel("-")
         self.lbl_spread.setObjectName("metricLabel")
 
+        self.lbl_est_speed = QLabel("-")
+        self.lbl_est_speed.setObjectName("metricLabel")
+
+        self.lbl_speed_confidence = QLabel("-")
+        self.lbl_speed_confidence.setObjectName("metricLabel")
+
         self.lbl_ambig = QLabel("GÜVENLİ")
         self.lbl_ambig.setObjectName("metricLabel")
         self.lbl_ambig.setStyleSheet("color: #a6e3a1;")
@@ -387,6 +419,8 @@ class MissionControlWindow(QMainWindow):
         tel_layout.addRow(self._create_title("Tahmin Konumu (harita X,Y):"), self.lbl_est_pos)
         tel_layout.addRow(self._create_title("Gerçek Yön (Pusula):"), self.lbl_true_heading)
         tel_layout.addRow(self._create_title("Tahmin Yönü:"), self.lbl_est_heading)
+        tel_layout.addRow(self._create_title("Tahmini Hız:"), self.lbl_est_speed)
+        tel_layout.addRow(self._create_title("Hız Güveni:"), self.lbl_speed_confidence)
         tel_layout.addRow(self._create_title("Sensör MSL (Deniz Seviyesi):"), self.lbl_msl)
         tel_layout.addRow(self._create_title("Lazer AGL (Zeminden Yükseklik):"), self.lbl_agl)
         tel_layout.addRow(self._create_title("Konum Hatası:"), self.lbl_error_pos)
@@ -622,10 +656,34 @@ class MissionControlWindow(QMainWindow):
         return False
 
     def _simulation_config(self) -> LocalizationConfig:
-        return apply_realistic_noise_mode(
+        config = apply_realistic_noise_mode(
             self.base_config,
             self.chk_realistic_noise.isChecked(),
         )
+        motion_mode = self.cmb_motion_mode.currentData()
+        config = replace(config, motion_mode=motion_mode)
+        if motion_mode == MOTION_MODE_UNKNOWN_CONSTANT_SPEED:
+            algorithm = config.algorithm
+            if not config.terrain.dem_path and max(
+                config.terrain.rows,
+                config.terrain.cols,
+            ) <= 100:
+                algorithm = replace(
+                    algorithm,
+                    min_profile_length=5,
+                    min_profile_duration_s=5.0,
+                    max_profile_duration_s=20.0,
+                    coarse_stride=5,
+                    medium_stride=2,
+                    refinement_radius_px=8,
+                    max_match_jump_m=0.0,
+                )
+            config = replace(
+                config,
+                sensor=replace(config.sensor, altitude_mode="barometric_altitude"),
+                algorithm=algorithm,
+            )
+        return config
 
     def eventFilter(self, watched, event):
         if event.type() == QEvent.KeyPress and self.isActiveWindow():
@@ -646,6 +704,7 @@ class MissionControlWindow(QMainWindow):
 
         self.log_text.append("[SYSTEM] Simülasyon başlatılıyor...")
         self.chk_realistic_noise.setEnabled(False)
+        self.cmb_motion_mode.setEnabled(False)
         self.btn_benchmark.setEnabled(False)
 
         # Reset paths
@@ -660,6 +719,9 @@ class MissionControlWindow(QMainWindow):
             "gerçekçi sensör gürültüsü" if self.chk_realistic_noise.isChecked() else "ideal sensör"
         )
         self.log_text.append(f"[SYSTEM] Sensör modu: {mode_text}.")
+        self.log_text.append(
+            f"[SYSTEM] Hareket bilgisi: {simulation.config.motion_mode}."
+        )
         self.map_canvas.plot_terrain(simulation.terrain)
         initial_state = simulation.get_current_state()
         self.true_path = [(initial_state[0], initial_state[1])]
@@ -703,6 +765,7 @@ class MissionControlWindow(QMainWindow):
         config = self._simulation_config()
         self.log_text.append("[BENCH] Kapsamlı benchmark modu başlatılıyor...")
         self.chk_realistic_noise.setEnabled(False)
+        self.cmb_motion_mode.setEnabled(False)
         self.btn_start.setEnabled(False)
         self.btn_benchmark.setEnabled(False)
         self.lbl_benchmark.setText("Kapsamlı benchmark çalışıyor...")
@@ -731,6 +794,7 @@ class MissionControlWindow(QMainWindow):
 
     def on_benchmark_finished(self, result: BenchmarkResult) -> None:
         self.chk_realistic_noise.setEnabled(True)
+        self.cmb_motion_mode.setEnabled(True)
         self.btn_start.setEnabled(True)
         self.btn_benchmark.setEnabled(True)
         self.benchmark_worker = None
@@ -758,6 +822,7 @@ class MissionControlWindow(QMainWindow):
 
     def on_benchmark_failed(self, message: str) -> None:
         self.chk_realistic_noise.setEnabled(True)
+        self.cmb_motion_mode.setEnabled(True)
         self.btn_start.setEnabled(True)
         self.btn_benchmark.setEnabled(True)
         self.benchmark_worker = None
@@ -832,6 +897,8 @@ class MissionControlWindow(QMainWindow):
             self.lbl_error_pos.setText("-")
             self.lbl_score.setText("-")
             self.lbl_spread.setText("-")
+            self.lbl_est_speed.setText("-")
+            self.lbl_speed_confidence.setText("-")
 
             if localization_status.get("rejection_reason") == "quality":
                 rejected_score = localization_status.get("rejected_score")
@@ -871,16 +938,48 @@ class MissionControlWindow(QMainWindow):
             if quality_score is None:
                 quality_score = est_state.score
             self.lbl_score.setText(f"{quality_score:.2f}")
+            if est_state.estimated_speed_m_s is None:
+                self.lbl_est_speed.setText("-")
+                self.lbl_speed_confidence.setText("-")
+            else:
+                self.lbl_est_speed.setText(f"{est_state.estimated_speed_m_s:.1f} m/s")
+                confidence_labels = {
+                    "high": "YÜKSEK",
+                    "medium": "ORTA",
+                    "low": "DÜŞÜK",
+                    "ambiguous": "BELİRSİZ",
+                    "unavailable": "-",
+                }
+                confidence = confidence_labels.get(
+                    est_state.speed_confidence or "unavailable",
+                    est_state.speed_confidence or "-",
+                )
+                spread_text = (
+                    f", σ {est_state.speed_spread_m_s:.1f} m/s"
+                    if est_state.speed_spread_m_s is not None
+                    else ""
+                )
+                self.lbl_speed_confidence.setText(f"{confidence}{spread_text}")
 
-            if est_state.is_ambiguous:
+            if est_state.speed_is_ambiguous:
+                self.lbl_ambig.setText("HIZ BELİRSİZ (AMBIG)")
+                self.lbl_ambig.setStyleSheet("color: #fab387;")
+            elif est_state.is_ambiguous:
                 self.lbl_ambig.setText("BELİRSİZ (AMBIG)")
                 self.lbl_ambig.setStyleSheet("color: #fab387;")
             else:
                 self.lbl_ambig.setText("GÜVENLİ (FIX)")
                 self.lbl_ambig.setStyleSheet("color: #a6e3a1;")
 
+            speed_text = (
+                f", Hız: {est_state.estimated_speed_m_s:.1f}m/s"
+                if est_state.estimated_speed_m_s is not None
+                else ""
+            )
             self.log_text.append(
-                f"[{step_idx:03d}] Fix: ({est_state.estimated_x:.0f}, {est_state.estimated_y:.0f}), Hata: {err_pos:.1f}m, Dağılım: {est_state.spatial_spread:.0f}m"
+                f"[{step_idx:03d}] Fix: ({est_state.estimated_x:.0f}, "
+                f"{est_state.estimated_y:.0f}), Hata: {err_pos:.1f}m, "
+                f"Dağılım: {est_state.spatial_spread:.0f}m{speed_text}"
             )
 
         self._update_search_status(localization_status)
@@ -895,6 +994,7 @@ class MissionControlWindow(QMainWindow):
 
     def on_finished(self):
         self.chk_realistic_noise.setEnabled(True)
+        self.cmb_motion_mode.setEnabled(True)
         benchmark_running = (
             self.benchmark_worker is not None and self.benchmark_worker.isRunning()
         )

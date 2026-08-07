@@ -5,7 +5,13 @@ from typing import Tuple
 
 import numpy as np
 
-from terrain_nav.config import SensorConfig
+from terrain_nav.config import (
+    MOTION_MODE_KNOWN_DISTANCE,
+    MOTION_MODE_MEASURED_SPEED,
+    MOTION_MODE_UNKNOWN_CONSTANT_SPEED,
+    MOTION_MODES,
+    SensorConfig,
+)
 from terrain_nav.coordinates import normalize_heading
 
 
@@ -15,8 +21,9 @@ class Measurement:
     laser_valid: bool
     baro_msl_m: float
     sensor_heading_deg: float
-    traveled_distance_m: float
+    traveled_distance_m: float | None
     measured_speed_m_s: float | None = None
+    timestamp_s: float = 0.0
 
 
 class SensorSimulator:
@@ -120,14 +127,28 @@ class SensorSimulator:
         true_heading_deg: float,
         traveled_distance_m: float,
         dt_s: float = 1.0,
+        timestamp_s: float = 0.0,
+        motion_mode: str = MOTION_MODE_KNOWN_DISTANCE,
     ) -> Measurement:
+        if motion_mode not in MOTION_MODES:
+            raise ValueError(f"Unknown motion mode: {motion_mode}")
+
         baro = self.step_barometer(true_msl_m, dt_s)
         laser, valid = self.measure_laser(true_msl_m, terrain_elevation_m)
         heading = self.measure_heading(true_heading_deg)
-        measured_distance, measured_speed = self.measure_traveled_distance(
-            traveled_distance_m,
-            dt_s,
-        )
+        if motion_mode == MOTION_MODE_UNKNOWN_CONSTANT_SPEED:
+            measured_distance = None
+            measured_speed = None
+        elif motion_mode == MOTION_MODE_MEASURED_SPEED:
+            measured_distance, measured_speed = self.measure_traveled_distance(
+                traveled_distance_m,
+                dt_s,
+            )
+        else:
+            measured_distance = float(traveled_distance_m)
+            measured_speed = (
+                float(traveled_distance_m) / float(dt_s) if dt_s > 0.0 else None
+            )
 
         return Measurement(
             laser_agl_m=laser,
@@ -136,4 +157,5 @@ class SensorSimulator:
             sensor_heading_deg=heading,
             traveled_distance_m=measured_distance,
             measured_speed_m_s=measured_speed,
+            timestamp_s=float(timestamp_s),
         )

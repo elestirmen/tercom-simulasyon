@@ -77,6 +77,61 @@ birikmesini azaltmak için kayan profili yaklaşık 2 km ile sınırlar. Manuel 
 olarak kalır; heading gürültüsü ayrıca
 `SensorConfig.heading_mode` üzerinden ayarlanabilir.
 
+## Speed-free localization
+
+Hareket bilgisi üç moddan biriyle seçilir:
+
+- `known_distance`: lokalizasyon kusursuz kat edilen mesafeyi kullanır ve
+  geriye uyumlu varsayılan moddur.
+- `measured_speed`: sensör hızından türetilen, gürültülü mesafeyi kullanır.
+- `unknown_constant_speed`: hız veya kat edilen mesafe almaz; barometre, lazer,
+  pusula, ölçüm zamanları, DEM ve fiziksel hız sınırlarıyla çalışır.
+
+Hızsız mod komut satırından iki eşdeğer biçimde açılabilir:
+
+```powershell
+python run_terrain_nav.py --unknown-speed
+python run_terrain_nav.py --motion-mode unknown_constant_speed
+
+# Tekrarlanabilir küçük sentetik/headless koşu
+python run_terrain_nav.py --headless --fast --unknown-speed
+
+# Fiziksel hız aralığını sınırla
+python run_terrain_nav.py --unknown-speed --speed-search-min 8 --speed-search-max 24
+```
+
+Masaüstü arayüzündeki `Hareket bilgisi` menüsünden de `Hız bilinmiyor` seçilebilir.
+Canlı telemetri, tahmini hızı ve hız güvenini gösterir.
+
+Bu mod, kayan profil penceresi boyunca hızın sabit fakat bilinmeyen olduğunu
+varsayar. Her aday hız için ardışık zaman farkı `dt` ile `v * dt` hareketi
+hesaplanır; her ölçümün kendi pusula yönü kullanıldığı için L, zikzak ve dönüşlü
+rotalar korunur. Konum ve hız hipotezi birlikte DEM üzerinde aranır. Hız gridinin
+varsayılanları:
+
+- aralık: `5.0 .. 30.0 m/s`
+- kaba adım: `5.0 m/s`
+- orta adım: `1.0 m/s`
+- ince adım: `0.2 m/s`
+- minimum profil süresi: `30 s`
+- maksimum profil süresi: `120 s`
+
+Simülatör uçağı hareket ettirmek için gerçek hızı bilir; ancak
+`unknown_constant_speed` ölçümlerinde `traveled_distance_m` ve
+`measured_speed_m_s` alanları boş bırakılır. Lokalizasyon çalışma konfigürasyonu
+rota başlangıcını, rota hızını veya diğer ground-truth rota alanlarını içermez.
+Gerçek hız yalnızca sonuç CSV'sindeki `speed_error_m_s` değerlendirme metriği
+için logger katmanında kullanılır.
+
+Sonuçlar; tahmini konum ve hızın yanında eşleşme skoru, inlier RMSE,
+korelasyon, geçerli örnek oranı, konumsal belirsizlik, ikinci en iyi hız,
+hız skor marjı, Top-K hız yayılımı ve hız güvenini içerir.
+
+> Düz veya tekrarlayan topoğrafyada konum ve hız birlikte gözlemlenebilir
+> olmayabilir. Bu durumda sistemin zorla `FIX` üretmesi yerine `AMBIGUOUS` veya
+> `QUALITY INSUFFICIENT` sonucu vermesi beklenir. Çok kısa profiller de hız
+> tahmini için yeterli arazi bilgisi taşımayabilir.
+
 ## Yapı
 
 ```text

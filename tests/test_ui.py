@@ -34,6 +34,10 @@ def test_ui_starts_with_active_map_scope_and_heading_arrow() -> None:
         assert "Benchmark" in window.lbl_benchmark.text()
         assert window.benchmark_tabs.count() == 3
         assert window.benchmark_variant_table.columnCount() == 8
+        assert window.cmb_motion_mode.count() == 3
+        assert window.cmb_motion_mode.currentData() == "known_distance"
+        assert window.lbl_est_speed.text() == "-"
+        assert window.lbl_speed_confidence.text() == "-"
         assert "Yükseklik profili" in window.profile_canvas.axes.get_title()
         assert window.lbl_true_pos.text() != "-"
     finally:
@@ -82,4 +86,21 @@ def test_ui_realistic_noise_toggle_can_start_ideal_mode_from_realistic_cli_confi
         window.stop_sim()
         if window.worker is not None:
             window.worker.wait(2000)
+        window.close()
+
+
+def test_ui_can_select_unknown_speed_mode() -> None:
+    app = QApplication.instance() or QApplication([])
+    assert app is not None
+    window = MissionControlWindow(build_config(fast_mode=True))
+    try:
+        index = window.cmb_motion_mode.findData("unknown_constant_speed")
+        window.cmb_motion_mode.setCurrentIndex(index)
+
+        config = window._simulation_config()
+
+        assert config.motion_mode == "unknown_constant_speed"
+        assert config.sensor.altitude_mode == "barometric_altitude"
+        assert config.algorithm.min_profile_duration_s == 5.0
+    finally:
         window.close()

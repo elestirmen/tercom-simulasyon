@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from terrain_nav.config import LocalizationConfig
+from terrain_nav.config import LocalizationConfig, LocalizationRuntimeConfig
 from terrain_nav.coordinates import CoordinateTransform
 from terrain_nav.profile import extract_profile_pixels, rotate_offsets
 
@@ -21,6 +21,7 @@ class Candidate:
     score: float  # Lower is better (error)
     valid_ratio: float
     metrics: Dict[str, float]
+    estimated_speed_m_s: float | None = None
 
 
 def huber_loss(error: np.ndarray, delta: float) -> float:
@@ -89,7 +90,7 @@ def evaluate_candidate(
     baro_msl: np.ndarray,
     base_offsets: List[Tuple[float, float, float]],
     ct: CoordinateTransform,
-    config: LocalizationConfig,
+    config: LocalizationConfig | LocalizationRuntimeConfig,
     pixel_offsets: Optional[np.ndarray] = None,
     compute_all_metrics: bool = True,
 ) -> Optional[Candidate]:
@@ -194,7 +195,12 @@ def evaluate_candidate(
 
 
 class ProfileMatcher:
-    def __init__(self, config: LocalizationConfig, dem: np.ndarray, ct: CoordinateTransform):
+    def __init__(
+        self,
+        config: LocalizationConfig | LocalizationRuntimeConfig,
+        dem: np.ndarray,
+        ct: CoordinateTransform,
+    ):
         self.config = config
         self.dem = dem
         self.ct = ct
@@ -570,28 +576,42 @@ class ProfileMatcher:
             r_end = min(bounds[1], rows, int(c.row + radius + 1))
             c_start = max(bounds[2], 0, int(c.col - radius))
             c_end = min(bounds[3], cols, int(c.col + radius + 1))
+            medium_headings = [c.heading_deg]
+            if len(search_headings) > 1:
+                medium_headings = sorted(
+                    search_headings,
+                    key=lambda heading: abs(
+                        ((heading - c.heading_deg + 180.0) % 360.0) - 180.0
+                    ),
+                )[:5]
 
             for r in range(r_start, r_end, m_stride):
                 for col in range(c_start, c_end, m_stride):
-                    cand = evaluate_candidate(
-                        r,
-                        col,
-                        c.heading_deg,
-                        self.dem,
-                        laser_agl,
-                        laser_valid,
-                        baro_msl,
-                        base_offsets,
-                        self.ct,
-                        self.config,
-                        pixel_offsets=self._pixel_offsets_for_heading(
-                            pixel_offset_cache, base_offsets, c.heading_deg
-                        ),
-                        compute_all_metrics=False,
-                    )
-                    if cand is not None:
-                        self._retain_top_candidate(medium_heap, cand, medium_sequence, top_k)
-                        medium_sequence += 1
+                    for heading in medium_headings:
+                        cand = evaluate_candidate(
+                            r,
+                            col,
+                            heading,
+                            self.dem,
+                            laser_agl,
+                            laser_valid,
+                            baro_msl,
+                            base_offsets,
+                            self.ct,
+                            self.config,
+                            pixel_offsets=self._pixel_offsets_for_heading(
+                                pixel_offset_cache, base_offsets, heading
+                            ),
+                            compute_all_metrics=False,
+                        )
+                        if cand is not None:
+                            self._retain_top_candidate(
+                                medium_heap,
+                                cand,
+                                medium_sequence,
+                                top_k,
+                            )
+                            medium_sequence += 1
 
         medium_cands = self._sorted_heap_candidates(medium_heap)
         if not medium_cands:

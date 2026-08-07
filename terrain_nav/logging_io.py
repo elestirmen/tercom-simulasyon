@@ -3,7 +3,7 @@
 import csv
 import json
 from dataclasses import asdict
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from terrain_nav.config import LocalizationConfig
 from terrain_nav.metrics import EstimatedState
@@ -11,13 +11,18 @@ from terrain_nav.metrics import EstimatedState
 
 def save_config(config: LocalizationConfig, filepath: str):
     """Save config to JSON."""
-    with open(filepath, "w") as f:
+    with open(filepath, "w", encoding="utf-8") as f:
         json.dump(asdict(config), f, indent=4)
 
 
-def save_results(results: List[Tuple[Tuple[float, float, float], EstimatedState]], filepath: str):
+def save_results(
+    results: List[Tuple[Tuple[float, float, float], Optional[EstimatedState]]],
+    filepath: str,
+    *,
+    true_speed_m_s: float | None = None,
+):
     """Save step-by-step results to CSV."""
-    with open(filepath, "w", newline="") as f:
+    with open(filepath, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(
             [
@@ -35,6 +40,17 @@ def save_results(results: List[Tuple[Tuple[float, float, float], EstimatedState]
                 "error_heading",
                 "is_ambiguous",
                 "score",
+                "inlier_rmse_m",
+                "correlation",
+                "valid_ratio",
+                "estimated_speed_m_s",
+                "second_best_speed_m_s",
+                "true_speed_m_s",
+                "speed_error_m_s",
+                "speed_is_ambiguous",
+                "speed_score_margin",
+                "speed_spread_m_s",
+                "speed_confidence",
             ]
         )
 
@@ -45,6 +61,11 @@ def save_results(results: List[Tuple[Tuple[float, float, float], EstimatedState]
             err_y = est_s.estimated_y - true_s[1]
             err_pos = (err_x**2 + err_y**2) ** 0.5
             err_h = est_s.estimated_heading_deg - true_s[2]
+            speed_error = (
+                abs(est_s.estimated_speed_m_s - true_speed_m_s)
+                if est_s.estimated_speed_m_s is not None and true_speed_m_s is not None
+                else None
+            )
 
             writer.writerow(
                 [
@@ -62,5 +83,16 @@ def save_results(results: List[Tuple[Tuple[float, float, float], EstimatedState]
                     err_h,
                     int(est_s.is_ambiguous),
                     est_s.score,
+                    est_s.quality_score,
+                    est_s.quality_correlation,
+                    est_s.quality_valid_ratio,
+                    est_s.estimated_speed_m_s,
+                    est_s.second_best_speed_m_s,
+                    true_speed_m_s,
+                    speed_error,
+                    int(est_s.speed_is_ambiguous),
+                    est_s.speed_score_margin,
+                    est_s.speed_spread_m_s,
+                    est_s.speed_confidence,
                 ]
             )

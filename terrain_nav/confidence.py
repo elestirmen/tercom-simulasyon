@@ -1,10 +1,23 @@
 """Confidence and ambiguity detection for profile matching."""
 
+from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 
 from terrain_nav.matcher import Candidate
+
+
+@dataclass(frozen=True)
+class SpeedConfidence:
+    """Summary of how distinctly the terrain profile identifies speed."""
+
+    is_ambiguous: bool
+    best_speed_m_s: Optional[float]
+    second_best_speed_m_s: Optional[float]
+    score_margin: Optional[float]
+    top_speed_std_m_s: Optional[float]
+    indicator: str
 
 
 def detect_ambiguity(
@@ -46,3 +59,66 @@ def detect_ambiguity(
     is_ambiguous = (margin < score_margin_threshold) and (spread > spatial_spread_threshold_px)
 
     return is_ambiguous, float(margin), float(spread)
+
+
+def assess_speed_confidence(
+    candidates: List[Candidate],
+    *,
+    score_margin_threshold: float,
+    speed_std_threshold_m_s: float,
+    top_k: int,
+    score_getter: Optional[Callable[[Candidate], float]] = None,
+) -> SpeedConfidence:
+    """Detect similarly scoring hypotheses that imply substantially different speeds."""
+    get_score = score_getter or (lambda candidate: candidate.score)
+    best_by_speed: dict[float, Candidate] = {}
+    for candidate in candidates:
+        speed = candidate.estimated_speed_m_s
+        if speed is None or not np.isfinite(speed):
+            continue
+        key = round(float(speed), 9)
+        previous = best_by_speed.get(key)
+        if previous is None or get_score(candidate) < get_score(previous):
+            best_by_speed[key] = candidate
+
+    ranked = sorted(
+        best_by_speed.values(),
+        key=lambda candidate: (get_score(candidate), candidate.estimated_speed_m_s or 0.0),
+    )
+    if not ranked:
+        return SpeedConfidence(False, None, None, None, None, "unavailable")
+    if len(ranked) == 1:
+        speed = float(ranked[0].estimated_speed_m_s)
+        return SpeedConfidence(False, speed, None, None, 0.0, "low")
+
+    best = ranked[0]
+    second = ranked[1]
+    score_1 = float(get_score(best))
+    score_2 = float(get_score(second))
+    epsilon = 1e-6
+    margin = abs(score_2 - score_1) / max(abs(score_2), epsilon)
+    top = ranked[: max(2, int(top_k))]
+    speed_spread = float(
+        np.std([float(candidate.estimated_speed_m_s) for candidate in top])
+    )
+    is_ambiguous = (
+        margin < score_margin_threshold and speed_spread > speed_std_threshold_m_s
+    )
+
+    if is_ambiguous:
+        indicator = "ambiguous"
+    elif margin >= max(0.15, score_margin_threshold * 3.0):
+        indicator = "high"
+    elif margin >= score_margin_threshold:
+        indicator = "medium"
+    else:
+        indicator = "low"
+
+    return SpeedConfidence(
+        is_ambiguous=is_ambiguous,
+        best_speed_m_s=float(best.estimated_speed_m_s),
+        second_best_speed_m_s=float(second.estimated_speed_m_s),
+        score_margin=float(margin),
+        top_speed_std_m_s=speed_spread,
+        indicator=indicator,
+    )

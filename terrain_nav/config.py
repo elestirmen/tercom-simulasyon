@@ -2,6 +2,17 @@
 
 from dataclasses import dataclass, field, replace
 
+MOTION_MODE_KNOWN_DISTANCE = "known_distance"
+MOTION_MODE_MEASURED_SPEED = "measured_speed"
+MOTION_MODE_UNKNOWN_CONSTANT_SPEED = "unknown_constant_speed"
+MOTION_MODES = frozenset(
+    {
+        MOTION_MODE_KNOWN_DISTANCE,
+        MOTION_MODE_MEASURED_SPEED,
+        MOTION_MODE_UNKNOWN_CONSTANT_SPEED,
+    }
+)
+
 
 @dataclass(frozen=True)
 class TerrainConfig:
@@ -82,6 +93,21 @@ class AlgorithmConfig:
     # Optional measured profile span cap. Zero leaves the count-based window as
     # the only limit.
     max_profile_distance_m: float = 0.0
+    # Unknown-speed profiles are gated and trimmed by elapsed time because
+    # distance is deliberately unavailable to the localizer in that mode.
+    min_profile_duration_s: float = 30.0
+    max_profile_duration_s: float = 120.0
+
+    # Constant-speed hypothesis search.
+    speed_search_min_m_s: float = 5.0
+    speed_search_max_m_s: float = 30.0
+    speed_search_coarse_step_m_s: float = 5.0
+    speed_search_medium_step_m_s: float = 1.0
+    speed_search_fine_step_m_s: float = 0.2
+    speed_search_keep_hypotheses: int = 3
+    speed_ambiguity_top_k: int = 5
+    speed_ambiguity_score_margin: float = 0.05
+    speed_ambiguity_std_threshold_m_s: float = 2.0
 
     # Coarse to fine
     coarse_stride: int = 10
@@ -110,6 +136,42 @@ class AlgorithmConfig:
     # Set to zero to disable motion-continuity gating.
     max_match_jump_m: float = 10.0
 
+    def __post_init__(self) -> None:
+        if self.speed_search_min_m_s <= 0.0:
+            raise ValueError("speed_search_min_m_s must be positive")
+        if self.speed_search_max_m_s <= self.speed_search_min_m_s:
+            raise ValueError("speed_search_max_m_s must be greater than speed_search_min_m_s")
+        for name in (
+            "speed_search_coarse_step_m_s",
+            "speed_search_medium_step_m_s",
+            "speed_search_fine_step_m_s",
+        ):
+            if getattr(self, name) <= 0.0:
+                raise ValueError(f"{name} must be positive")
+        if self.speed_search_keep_hypotheses < 1:
+            raise ValueError("speed_search_keep_hypotheses must be at least 1")
+        if self.speed_ambiguity_top_k < 2:
+            raise ValueError("speed_ambiguity_top_k must be at least 2")
+        if self.speed_ambiguity_score_margin < 0.0:
+            raise ValueError("speed_ambiguity_score_margin cannot be negative")
+        if self.speed_ambiguity_std_threshold_m_s < 0.0:
+            raise ValueError("speed_ambiguity_std_threshold_m_s cannot be negative")
+        if self.min_profile_duration_s < 0.0:
+            raise ValueError("min_profile_duration_s cannot be negative")
+        if self.max_profile_duration_s <= self.min_profile_duration_s:
+            raise ValueError(
+                "max_profile_duration_s must be greater than min_profile_duration_s"
+            )
+
+
+@dataclass(frozen=True)
+class LocalizationRuntimeConfig:
+    """Configuration visible inside localization, excluding all truth route data."""
+
+    sensor: SensorConfig
+    algorithm: AlgorithmConfig
+    motion_mode: str
+
 
 @dataclass(frozen=True)
 class LocalizationConfig:
@@ -117,6 +179,21 @@ class LocalizationConfig:
     route: RouteConfig = field(default_factory=RouteConfig)
     sensor: SensorConfig = field(default_factory=SensorConfig)
     algorithm: AlgorithmConfig = field(default_factory=AlgorithmConfig)
+    motion_mode: str = MOTION_MODE_KNOWN_DISTANCE
+
+    def __post_init__(self) -> None:
+        if self.motion_mode not in MOTION_MODES:
+            expected = ", ".join(sorted(MOTION_MODES))
+            raise ValueError(f"motion_mode must be one of: {expected}")
+
+
+def localization_runtime_config(config: LocalizationConfig) -> LocalizationRuntimeConfig:
+    """Copy only configuration that the localization algorithm is allowed to observe."""
+    return LocalizationRuntimeConfig(
+        sensor=config.sensor,
+        algorithm=config.algorithm,
+        motion_mode=config.motion_mode,
+    )
 
 
 def uses_realistic_noise_mode(config: LocalizationConfig) -> bool:
@@ -165,6 +242,11 @@ def apply_realistic_noise_mode(
                 max_match_inlier_rmse_m=5.0,
                 max_match_jump_m=50.0,
             ),
+            motion_mode=(
+                config.motion_mode
+                if config.motion_mode == MOTION_MODE_UNKNOWN_CONSTANT_SPEED
+                else MOTION_MODE_MEASURED_SPEED
+            ),
         )
 
     default_sensor = SensorConfig()
@@ -189,5 +271,10 @@ def apply_realistic_noise_mode(
             max_profile_distance_m=default_algorithm.max_profile_distance_m,
             max_match_inlier_rmse_m=default_algorithm.max_match_inlier_rmse_m,
             max_match_jump_m=default_algorithm.max_match_jump_m,
+        ),
+        motion_mode=(
+            config.motion_mode
+            if config.motion_mode == MOTION_MODE_UNKNOWN_CONSTANT_SPEED
+            else MOTION_MODE_KNOWN_DISTANCE
         ),
     )

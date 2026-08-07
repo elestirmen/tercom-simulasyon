@@ -1,5 +1,6 @@
 """Tests for headless execution."""
 
+import csv
 import os
 import subprocess
 from pathlib import Path
@@ -22,3 +23,7 @@ def test_headless_mode_creates_files(tmp_path):
     out_dir = script.parent / "results"
     assert (out_dir / "config.json").exists()
     assert (out_dir / "results.csv").exists()
+    with (out_dir / "results.csv").open(encoding="utf-8", newline="") as result_file:
+        headers = next(csv.reader(result_file))
+    assert "estimated_speed_m_s" in headers
+    assert "speed_confidence" in headers

@@ -4,7 +4,14 @@ import argparse
 from dataclasses import replace
 from pathlib import Path
 
-from terrain_nav.config import LocalizationConfig, apply_realistic_noise_mode
+from terrain_nav.config import (
+    MOTION_MODE_KNOWN_DISTANCE,
+    MOTION_MODE_MEASURED_SPEED,
+    MOTION_MODE_UNKNOWN_CONSTANT_SPEED,
+    MOTION_MODES,
+    LocalizationConfig,
+    apply_realistic_noise_mode,
+)
 from terrain_nav.logging_io import save_config, save_results
 from terrain_nav.simulation import SimulationEngine
 
@@ -34,9 +41,18 @@ def build_config(
     start_row: int | None = None,
     start_col: int | None = None,
     realistic_noise: bool = False,
+    motion_mode: str | None = None,
+    speed_search_min_m_s: float | None = None,
+    speed_search_max_m_s: float | None = None,
 ) -> LocalizationConfig:
     config = LocalizationConfig()
     resolved_dem_path = _resolve_dem_path(dem_path, fast_mode)
+    selected_motion_mode = motion_mode or (
+        MOTION_MODE_MEASURED_SPEED if realistic_noise else MOTION_MODE_KNOWN_DISTANCE
+    )
+    if selected_motion_mode not in MOTION_MODES:
+        expected = ", ".join(sorted(MOTION_MODES))
+        raise ValueError(f"motion_mode must be one of: {expected}")
 
     terrain_updates = {}
     if resolved_dem_path:
@@ -51,6 +67,13 @@ def build_config(
     algorithm = config.algorithm
     if search_roi_size_px is not None:
         algorithm = replace(algorithm, search_roi_size_px=max(0, int(search_roi_size_px)))
+    speed_updates = {}
+    if speed_search_min_m_s is not None:
+        speed_updates["speed_search_min_m_s"] = float(speed_search_min_m_s)
+    if speed_search_max_m_s is not None:
+        speed_updates["speed_search_max_m_s"] = float(speed_search_max_m_s)
+    if speed_updates:
+        algorithm = replace(algorithm, **speed_updates)
 
     route_updates = {}
     if start_row is not None:
@@ -58,27 +81,66 @@ def build_config(
     if start_col is not None:
         route_updates["start_col"] = int(start_col)
     if fast_mode and not resolved_dem_path:
-        terrain = replace(terrain, rows=100, cols=100)
+        if selected_motion_mode == MOTION_MODE_UNKNOWN_CONSTANT_SPEED:
+            terrain = replace(terrain, rows=120, cols=160)
+        else:
+            terrain = replace(terrain, rows=100, cols=100)
         if start_row is None:
             route_updates["start_row"] = terrain.rows // 2
         if start_col is None:
-            route_updates["start_col"] = terrain.cols // 2
+            route_updates["start_col"] = (
+                30
+                if selected_motion_mode == MOTION_MODE_UNKNOWN_CONSTANT_SPEED
+                else terrain.cols // 2
+            )
     route = replace(config.route, **route_updates)
     if fast_mode:
-        route = replace(route, route_length_m=50.0)
+        if selected_motion_mode == MOTION_MODE_UNKNOWN_CONSTANT_SPEED:
+            route = replace(
+                route,
+                heading_deg=90.0,
+                sample_spacing_m=5.0,
+                route_length_m=80.0,
+            )
+        else:
+            route = replace(route, route_length_m=50.0)
 
     sensor = config.sensor
+    built_config = replace(
+        config,
+        terrain=terrain,
+        route=route,
+        sensor=sensor,
+        algorithm=algorithm,
+        motion_mode=selected_motion_mode,
+    )
     if realistic_noise:
-        base_config = replace(
-            config, terrain=terrain, route=route, sensor=sensor, algorithm=algorithm
-        )
-        return apply_realistic_noise_mode(
-            base_config,
+        built_config = apply_realistic_noise_mode(
+            built_config,
             True,
             fast_synthetic=fast_mode and not resolved_dem_path,
         )
+        built_config = replace(built_config, motion_mode=selected_motion_mode)
 
-    return replace(config, terrain=terrain, route=route, sensor=sensor, algorithm=algorithm)
+    if selected_motion_mode == MOTION_MODE_UNKNOWN_CONSTANT_SPEED:
+        unknown_algorithm = built_config.algorithm
+        if fast_mode and not resolved_dem_path:
+            unknown_algorithm = replace(
+                unknown_algorithm,
+                min_profile_length=10,
+                min_profile_duration_s=4.0,
+                max_profile_duration_s=20.0,
+                coarse_stride=5,
+                medium_stride=2,
+                refinement_radius_px=8,
+                max_match_jump_m=0.0,
+            )
+        built_config = replace(
+            built_config,
+            sensor=replace(built_config.sensor, altitude_mode="barometric_altitude"),
+            algorithm=unknown_algorithm,
+        )
+    return built_config
 
 
 def run_headless(**config_kwargs) -> None:
@@ -95,7 +157,11 @@ def run_headless(**config_kwargs) -> None:
         output_dir = PROJECT_ROOT / "results"
         output_dir.mkdir(exist_ok=True)
         save_config(simulation.config, output_dir / "config.json")
-        save_results(results, output_dir / "results.csv")
+        save_results(
+            results,
+            output_dir / "results.csv",
+            true_speed_m_s=simulation.config.route.speed_m_s,
+        )
         print(f"Sonuçlar yazıldı: {output_dir}")
     finally:
         simulation.close()
@@ -115,11 +181,26 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use barometric relative altitude and noisy speed measurements",
     )
+    parser.add_argument(
+        "--motion-mode",
+        choices=sorted(MOTION_MODES),
+        help="Motion input available to localization",
+    )
+    parser.add_argument(
+        "--unknown-speed",
+        action="store_true",
+        help="Estimate constant speed from timestamps and DEM profile matching",
+    )
+    parser.add_argument("--speed-search-min", type=float, metavar="M_S")
+    parser.add_argument("--speed-search-max", type=float, metavar="M_S")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    motion_mode = (
+        MOTION_MODE_UNKNOWN_CONSTANT_SPEED if args.unknown_speed else args.motion_mode
+    )
     config_kwargs = {
         "fast_mode": args.fast,
         "dem_path": args.dem,
@@ -128,6 +209,9 @@ def main() -> None:
         "start_row": args.start_row,
         "start_col": args.start_col,
         "realistic_noise": args.realistic_noise,
+        "motion_mode": motion_mode,
+        "speed_search_min_m_s": args.speed_search_min,
+        "speed_search_max_m_s": args.speed_search_max,
     }
     if args.headless:
         run_headless(**config_kwargs)

@@ -1,11 +1,62 @@
 """Profile extraction from DEM using bilinear interpolation."""
 
 import math
-from typing import List, Tuple
+from typing import List, Sequence, Tuple
 
 import numpy as np
 
 from terrain_nav.coordinates import CoordinateTransform, normalize_heading
+from terrain_nav.sensors import Measurement
+
+
+def build_offsets_for_candidate_speed(
+    measurements: Sequence[Measurement],
+    candidate_speed_m_s: float,
+    ct: CoordinateTransform,
+) -> List[Tuple[float, float, float]]:
+    """Build a turn-aware relative route using timestamps and one speed hypothesis."""
+    speed = float(candidate_speed_m_s)
+    if not math.isfinite(speed) or speed <= 0.0:
+        raise ValueError("candidate_speed_m_s must be a finite positive value")
+    if not measurements:
+        return []
+
+    offsets: List[Tuple[float, float, float]] = []
+    current_x = 0.0
+    current_y = 0.0
+    previous_timestamp = float(measurements[0].timestamp_s)
+    if not math.isfinite(previous_timestamp):
+        raise ValueError("Measurement timestamps must be finite")
+
+    for index, measurement in enumerate(measurements):
+        timestamp = float(measurement.timestamp_s)
+        if not math.isfinite(timestamp):
+            raise ValueError("Measurement timestamps must be finite")
+        if index > 0:
+            dt_s = timestamp - previous_timestamp
+            if dt_s <= 0.0:
+                raise ValueError("Measurement timestamps must be strictly increasing")
+            distance_m = speed * dt_s
+            dx, dy = ct.offset_meters(distance_m, measurement.sensor_heading_deg)
+            current_x += dx
+            current_y += dy
+        offsets.append((current_x, current_y, measurement.sensor_heading_deg))
+        previous_timestamp = timestamp
+    return offsets
+
+
+def build_distances_for_candidate_speed(
+    measurements: Sequence[Measurement],
+    candidate_speed_m_s: float,
+) -> List[float]:
+    """Return cumulative profile distances implied by timestamps and candidate speed."""
+    if not measurements:
+        return []
+    start_timestamp = float(measurements[0].timestamp_s)
+    return [
+        max(0.0, (float(measurement.timestamp_s) - start_timestamp) * candidate_speed_m_s)
+        for measurement in measurements
+    ]
 
 
 def rotate_offsets(

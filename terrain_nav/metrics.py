@@ -17,6 +17,13 @@ class EstimatedState:
     score_margin: float
     quality_score: Optional[float] = None
     quality_correlation: Optional[float] = None
+    quality_valid_ratio: Optional[float] = None
+    estimated_speed_m_s: Optional[float] = None
+    second_best_speed_m_s: Optional[float] = None
+    speed_is_ambiguous: bool = False
+    speed_score_margin: Optional[float] = None
+    speed_spread_m_s: Optional[float] = None
+    speed_confidence: Optional[str] = None
 
 
 @dataclass
@@ -28,3 +35,4 @@ class ProfileComparison:
     candidate_score: Optional[float] = None
     quality_score: Optional[float] = None
     quality_correlation: Optional[float] = None
+    estimated_speed_m_s: Optional[float] = None

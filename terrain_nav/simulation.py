@@ -6,12 +6,22 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from terrain_nav.confidence import detect_ambiguity
-from terrain_nav.config import LocalizationConfig
+from terrain_nav.confidence import SpeedConfidence, assess_speed_confidence, detect_ambiguity
+from terrain_nav.config import (
+    MOTION_MODE_UNKNOWN_CONSTANT_SPEED,
+    LocalizationConfig,
+    LocalizationRuntimeConfig,
+    localization_runtime_config,
+)
 from terrain_nav.coordinates import CoordinateTransform
 from terrain_nav.matcher import Candidate, ProfileMatcher
 from terrain_nav.metrics import EstimatedState, ProfileComparison
-from terrain_nav.profile import extract_profile, rotate_offsets
+from terrain_nav.profile import (
+    build_distances_for_candidate_speed,
+    build_offsets_for_candidate_speed,
+    extract_profile,
+    rotate_offsets,
+)
 from terrain_nav.sensors import Measurement, SensorSimulator
 from terrain_nav.terrain import TerrainManager
 
@@ -23,40 +33,75 @@ class MotionOutOfBoundsError(ValueError):
 class LocalizationEngine:
     """Isolated from ground truth. Only knows navigation DEM and incoming measurements."""
 
-    def __init__(self, config: LocalizationConfig, nav_dem: np.ndarray, ct: CoordinateTransform):
-        self.config = config
+    def __init__(
+        self,
+        config: LocalizationConfig | LocalizationRuntimeConfig,
+        nav_dem: np.ndarray,
+        ct: CoordinateTransform,
+    ):
+        self.config = (
+            localization_runtime_config(config)
+            if isinstance(config, LocalizationConfig)
+            else config
+        )
         self.nav_dem = nav_dem
         self.ct = ct
-        self.matcher = ProfileMatcher(config, nav_dem, ct)
+        self.matcher = ProfileMatcher(self.config, nav_dem, ct)
 
         self.measurements = []  # List of Measurement
         self.relative_offsets = []  # List of (dx, dy, heading) relative to start of window
         self.last_match_pixel: Optional[Tuple[float, float]] = None
-        self.base_search_roi_size = max(0, int(config.algorithm.search_roi_size_px))
+        self.base_search_roi_size = max(0, int(self.config.algorithm.search_roi_size_px))
         self.current_search_roi_size = self.base_search_roi_size
         self.recovery_active = False
         self.last_rejection_reason: Optional[str] = None
         self.last_rejected_score: Optional[float] = None
         self.last_profile_comparison: Optional[ProfileComparison] = None
+        self.last_estimated_speed_m_s: Optional[float] = None
+
+    def _uses_unknown_speed(self) -> bool:
+        return self.config.motion_mode == MOTION_MODE_UNKNOWN_CONSTANT_SPEED
 
     def _drop_oldest_measurement(self) -> None:
         """Remove the oldest sample and keep the profile-start anchor aligned."""
-        self.measurements.pop(0)
+        removed = self.measurements.pop(0)
         if self.last_match_pixel is not None and self.measurements:
             # Each measurement stores the motion that ended at that sample.
             # After removing the oldest sample, advance the anchor with the
             # motion attached to the new oldest sample.
             new_oldest = self.measurements[0]
-            d_row, d_col = self.ct.offset_pixels(
-                new_oldest.traveled_distance_m,
-                new_oldest.sensor_heading_deg,
-            )
+            if self._uses_unknown_speed():
+                if self.last_estimated_speed_m_s is None:
+                    self._enter_global_recovery()
+                    return
+                dt_s = float(new_oldest.timestamp_s) - float(removed.timestamp_s)
+                d_row, d_col = self.ct.offset_pixels(
+                    self.last_estimated_speed_m_s * dt_s,
+                    new_oldest.sensor_heading_deg,
+                )
+            else:
+                if new_oldest.traveled_distance_m is None:
+                    raise ValueError("Distance is required outside unknown-speed mode")
+                d_row, d_col = self.ct.offset_pixels(
+                    new_oldest.traveled_distance_m,
+                    new_oldest.sensor_heading_deg,
+                )
             self.last_match_pixel = (
                 self.last_match_pixel[0] + d_row,
                 self.last_match_pixel[1] + d_col,
             )
 
     def add_measurement(self, m: Measurement):
+        if self._uses_unknown_speed():
+            if m.traveled_distance_m is not None or m.measured_speed_m_s is not None:
+                raise ValueError(
+                    "unknown_constant_speed measurements must not contain speed or distance"
+                )
+            if self.measurements and m.timestamp_s <= self.measurements[-1].timestamp_s:
+                raise ValueError("Measurement timestamps must be strictly increasing")
+        elif m.traveled_distance_m is None:
+            raise ValueError("Distance is required outside unknown-speed mode")
+
         self.measurements.append(m)
 
         algorithm = self.config.algorithm
@@ -64,13 +109,21 @@ class LocalizationEngine:
         while len(self.measurements) > max_measurements:
             self._drop_oldest_measurement()
 
-        max_profile_distance_m = float(algorithm.max_profile_distance_m)
-        while (
-            max_profile_distance_m > 0.0
-            and len(self.measurements) > algorithm.min_profile_length
-            and self._profile_distance_m() > max_profile_distance_m
-        ):
-            self._drop_oldest_measurement()
+        if self._uses_unknown_speed():
+            max_duration_s = float(algorithm.max_profile_duration_s)
+            while (
+                len(self.measurements) > algorithm.min_profile_length
+                and self._profile_duration_s() > max_duration_s
+            ):
+                self._drop_oldest_measurement()
+        else:
+            max_profile_distance_m = float(algorithm.max_profile_distance_m)
+            while (
+                max_profile_distance_m > 0.0
+                and len(self.measurements) > algorithm.min_profile_length
+                and self._profile_distance_m() > max_profile_distance_m
+            ):
+                self._drop_oldest_measurement()
 
         self._recompute_offsets()
 
@@ -80,12 +133,23 @@ class LocalizationEngine:
         if not self.measurements:
             return
 
+        if self._uses_unknown_speed():
+            if self.last_estimated_speed_m_s is not None:
+                self.relative_offsets = build_offsets_for_candidate_speed(
+                    self.measurements,
+                    self.last_estimated_speed_m_s,
+                    self.ct,
+                )
+            return
+
         curr_x, curr_y = 0.0, 0.0
 
         for index, measurement in enumerate(self.measurements):
             # A measurement's odometry describes the movement from the previous
             # sample into this sample. The first item anchors the profile at zero.
             if index > 0:
+                if measurement.traveled_distance_m is None:
+                    raise ValueError("Distance is required outside unknown-speed mode")
                 dx, dy = self.ct.offset_meters(
                     measurement.traveled_distance_m,
                     measurement.sensor_heading_deg,
@@ -96,16 +160,50 @@ class LocalizationEngine:
 
     def _profile_distance_m(self) -> float:
         """Return the measured horizontal span covered by the current profile."""
-        return float(sum(m.traveled_distance_m for m in self.measurements[1:]))
+        distances = [m.traveled_distance_m for m in self.measurements[1:]]
+        if any(distance is None for distance in distances):
+            raise ValueError("Profile distance is unavailable in unknown-speed mode")
+        return float(sum(float(distance) for distance in distances))
 
-    def _profile_distances_m(self) -> list[float]:
+    def _profile_duration_s(self) -> float:
+        if len(self.measurements) < 2:
+            return 0.0
+        return float(self.measurements[-1].timestamp_s - self.measurements[0].timestamp_s)
+
+    def _profile_distances_m(self, candidate: Optional[Candidate] = None) -> list[float]:
+        if self._uses_unknown_speed():
+            speed = (
+                candidate.estimated_speed_m_s
+                if candidate is not None
+                else self.last_estimated_speed_m_s
+            )
+            if speed is None:
+                algorithm = self.config.algorithm
+                speed = (
+                    algorithm.speed_search_min_m_s + algorithm.speed_search_max_m_s
+                ) / 2.0
+            return build_distances_for_candidate_speed(self.measurements, speed)
+
         distances = []
         total = 0.0
         for index, measurement in enumerate(self.measurements):
             if index > 0:
+                if measurement.traveled_distance_m is None:
+                    raise ValueError("Distance is required outside unknown-speed mode")
                 total += float(measurement.traveled_distance_m)
             distances.append(total)
         return distances
+
+    def _offsets_for_candidate(self, candidate: Candidate) -> list[tuple[float, float, float]]:
+        if not self._uses_unknown_speed():
+            return self.relative_offsets
+        if candidate.estimated_speed_m_s is None:
+            raise ValueError("Unknown-speed candidate is missing its speed hypothesis")
+        return build_offsets_for_candidate_speed(
+            self.measurements,
+            candidate.estimated_speed_m_s,
+            self.ct,
+        )
 
     def _measured_terrain_profile(
         self,
@@ -152,13 +250,17 @@ class LocalizationEngine:
         baro = np.array([m.baro_msl_m for m in self.measurements], dtype=np.float64)
         matched_dem = np.full(len(laser), np.nan, dtype=np.float64)
 
-        if candidate is not None and self.relative_offsets:
-            angle_delta = candidate.heading_deg - self.relative_offsets[0][2]
+        if candidate is not None:
+            candidate_offsets = self._offsets_for_candidate(candidate)
+        else:
+            candidate_offsets = []
+        if candidate is not None and candidate_offsets:
+            angle_delta = candidate.heading_deg - candidate_offsets[0][2]
             matched_dem = extract_profile(
                 self.nav_dem,
                 candidate.row,
                 candidate.col,
-                rotate_offsets(self.relative_offsets, angle_delta),
+                rotate_offsets(candidate_offsets, angle_delta),
                 self.ct,
             )
 
@@ -170,13 +272,16 @@ class LocalizationEngine:
             self._candidate_quality_correlation(candidate) if candidate is not None else None
         )
         return ProfileComparison(
-            distances_m=self._profile_distances_m(),
+            distances_m=self._profile_distances_m(candidate),
             measured_elevation_m=measured.tolist(),
             matched_elevation_m=matched_dem.tolist(),
             status=status,
             candidate_score=candidate.score if candidate is not None else None,
             quality_score=quality_score,
             quality_correlation=quality_correlation,
+            estimated_speed_m_s=(
+                candidate.estimated_speed_m_s if candidate is not None else None
+            ),
         )
 
     def _search_bounds(self) -> Optional[Tuple[int, int, int, int]]:
@@ -252,6 +357,266 @@ class LocalizationEngine:
         metrics = candidate.metrics
         return float(metrics.get("inlier_correlation", metrics.get("correlation", 1.0)))
 
+    @staticmethod
+    def _inclusive_speed_values(minimum: float, maximum: float, step: float) -> list[float]:
+        count = int(math.floor((maximum - minimum) / step + 1e-9))
+        values = [round(minimum + index * step, 9) for index in range(count + 1)]
+        if not values or values[-1] < maximum - 1e-9:
+            values.append(round(maximum, 9))
+        return values
+
+    @staticmethod
+    def _refined_speed_values(
+        centers: list[float],
+        *,
+        radius: float,
+        step: float,
+        minimum: float,
+        maximum: float,
+    ) -> list[float]:
+        values: set[float] = set()
+        for center in centers:
+            first_index = math.ceil((minimum - center) / step)
+            last_index = math.floor((maximum - center) / step)
+            radius_steps = int(math.ceil(radius / step))
+            first_index = max(first_index, -radius_steps)
+            last_index = min(last_index, radius_steps)
+            for index in range(first_index, last_index + 1):
+                value = center + index * step
+                if minimum - 1e-9 <= value <= maximum + 1e-9:
+                    values.add(round(min(maximum, max(minimum, value)), 9))
+        return sorted(values)
+
+    def _speed_seed_candidates(self, candidates: list[Candidate]) -> list[Candidate]:
+        algorithm = self.config.algorithm
+        ranked = sorted(
+            candidates,
+            key=lambda candidate: (
+                self._candidate_quality_score(candidate),
+                candidate.score,
+            ),
+        )
+        best_by_speed: dict[float, Candidate] = {}
+        for candidate in ranked:
+            if candidate.estimated_speed_m_s is None:
+                continue
+            key = round(candidate.estimated_speed_m_s, 9)
+            best_by_speed.setdefault(key, candidate)
+        selected_speeds = {
+            round(float(candidate.estimated_speed_m_s), 9)
+            for candidate in list(best_by_speed.values())[
+                : algorithm.speed_search_keep_hypotheses
+            ]
+        }
+        limit = algorithm.speed_search_keep_hypotheses * max(1, algorithm.top_k)
+        return [
+            candidate
+            for candidate in ranked
+            if candidate.estimated_speed_m_s is not None
+            and round(candidate.estimated_speed_m_s, 9) in selected_speeds
+        ][:limit]
+
+    def _bounds_around_speed_seed(
+        self,
+        seed: Candidate,
+        radius_px: int,
+        parent_bounds: Optional[Tuple[int, int, int, int]],
+    ) -> Tuple[int, int, int, int]:
+        rows, cols = self.nav_dem.shape
+        parent = parent_bounds or (0, rows, 0, cols)
+        return (
+            max(parent[0], 0, int(math.floor(seed.row - radius_px))),
+            min(parent[1], rows, int(math.ceil(seed.row + radius_px + 1))),
+            max(parent[2], 0, int(math.floor(seed.col - radius_px))),
+            min(parent[3], cols, int(math.ceil(seed.col + radius_px + 1))),
+        )
+
+    @staticmethod
+    def _merge_search_bounds(
+        bounds: list[Tuple[int, int, int, int]],
+    ) -> list[Tuple[int, int, int, int]]:
+        merged: list[Tuple[int, int, int, int]] = []
+        for candidate in bounds:
+            current = candidate
+            index = 0
+            while index < len(merged):
+                existing = merged[index]
+                separated = (
+                    current[1] < existing[0]
+                    or existing[1] < current[0]
+                    or current[3] < existing[2]
+                    or existing[3] < current[2]
+                )
+                if separated:
+                    index += 1
+                    continue
+                current = (
+                    min(current[0], existing[0]),
+                    max(current[1], existing[1]),
+                    min(current[2], existing[2]),
+                    max(current[3], existing[3]),
+                )
+                merged.pop(index)
+                index = 0
+            merged.append(current)
+        return merged
+
+    def _search_speed_stage(
+        self,
+        laser: np.ndarray,
+        valid: np.ndarray,
+        baro: np.ndarray,
+        search_headings: list[float],
+        speeds: list[float],
+        parent_bounds: Optional[Tuple[int, int, int, int]],
+        *,
+        seeds: Optional[list[Candidate]] = None,
+        seed_radius_px: int = 0,
+    ) -> list[Candidate]:
+        unique_candidates: dict[tuple[float, float, float, float], Candidate] = {}
+        for speed in speeds:
+            offsets = build_offsets_for_candidate_speed(self.measurements, speed, self.ct)
+            if seeds:
+                stage_bounds = self._merge_search_bounds(
+                    [
+                        self._bounds_around_speed_seed(
+                            seed,
+                            seed_radius_px,
+                            parent_bounds,
+                        )
+                        for seed in seeds
+                    ]
+                )
+            else:
+                stage_bounds = [parent_bounds]
+
+            for bounds in stage_bounds:
+                candidates = self.matcher.coarse_to_fine_search(
+                    laser,
+                    valid,
+                    baro,
+                    offsets,
+                    search_headings,
+                    search_bounds=bounds,
+                )
+                for candidate in candidates:
+                    tagged = replace(candidate, estimated_speed_m_s=float(speed))
+                    key = (
+                        round(tagged.row, 3),
+                        round(tagged.col, 3),
+                        round(tagged.heading_deg, 3),
+                        round(float(speed), 9),
+                    )
+                    previous = unique_candidates.get(key)
+                    if previous is None or tagged.score < previous.score:
+                        unique_candidates[key] = tagged
+        return sorted(
+            unique_candidates.values(),
+            key=lambda candidate: (
+                self._candidate_quality_score(candidate),
+                candidate.score,
+            ),
+        )
+
+    def _unknown_speed_candidates(
+        self,
+        laser: np.ndarray,
+        valid: np.ndarray,
+        baro: np.ndarray,
+        search_headings: list[float],
+        search_bounds: Optional[Tuple[int, int, int, int]],
+    ) -> list[Candidate]:
+        """Jointly refine position and one constant speed over the profile window."""
+        algorithm = self.config.algorithm
+        minimum = float(algorithm.speed_search_min_m_s)
+        maximum = float(algorithm.speed_search_max_m_s)
+        coarse_step = float(algorithm.speed_search_coarse_step_m_s)
+        medium_step = float(algorithm.speed_search_medium_step_m_s)
+        fine_step = float(algorithm.speed_search_fine_step_m_s)
+
+        coarse_speeds = self._inclusive_speed_values(minimum, maximum, coarse_step)
+        coarse = self._search_speed_stage(
+            laser,
+            valid,
+            baro,
+            search_headings,
+            coarse_speeds,
+            search_bounds,
+        )
+        coarse_seeds = self._speed_seed_candidates(coarse)
+        if not coarse_seeds:
+            return []
+
+        medium_centers = sorted(
+            {float(candidate.estimated_speed_m_s) for candidate in coarse_seeds}
+        )
+        medium_speeds = self._refined_speed_values(
+            medium_centers,
+            radius=coarse_step,
+            step=medium_step,
+            minimum=minimum,
+            maximum=maximum,
+        )
+        medium = self._search_speed_stage(
+            laser,
+            valid,
+            baro,
+            search_headings,
+            medium_speeds,
+            search_bounds,
+            seeds=coarse_seeds,
+            seed_radius_px=max(
+                algorithm.refinement_radius_px * 2,
+                algorithm.coarse_stride * 2,
+            ),
+        )
+        medium_seeds = self._speed_seed_candidates(medium or coarse)
+
+        fine_centers = sorted(
+            {float(candidate.estimated_speed_m_s) for candidate in medium_seeds}
+        )
+        fine_speeds = self._refined_speed_values(
+            fine_centers,
+            radius=medium_step,
+            step=fine_step,
+            minimum=minimum,
+            maximum=maximum,
+        )
+        fine = self._search_speed_stage(
+            laser,
+            valid,
+            baro,
+            search_headings,
+            fine_speeds,
+            search_bounds,
+            seeds=medium_seeds,
+            seed_radius_px=max(
+                algorithm.refinement_radius_px,
+                algorithm.medium_stride * 2,
+            ),
+        )
+
+        combined: dict[tuple[float, float, float, float], Candidate] = {}
+        for candidate in [*coarse, *medium, *fine]:
+            if candidate.estimated_speed_m_s is None:
+                continue
+            key = (
+                round(candidate.row, 3),
+                round(candidate.col, 3),
+                round(candidate.heading_deg, 3),
+                round(candidate.estimated_speed_m_s, 9),
+            )
+            previous = combined.get(key)
+            if previous is None or candidate.score < previous.score:
+                combined[key] = candidate
+        return sorted(
+            combined.values(),
+            key=lambda candidate: (
+                self._candidate_quality_score(candidate),
+                candidate.score,
+            ),
+        )
+
     def get_search_status(self) -> dict:
         """Expose the exact search area used for the next localization call."""
         rows, cols = self.nav_dem.shape
@@ -272,6 +637,8 @@ class LocalizationEngine:
                 "roi_size_px": max(rows, cols),
                 "rejection_reason": self.last_rejection_reason,
                 "rejected_score": self.last_rejected_score,
+                "motion_mode": self.config.motion_mode,
+                "estimated_speed_m_s": self.last_estimated_speed_m_s,
             }
         return {
             "mode": "local_roi",
@@ -282,6 +649,8 @@ class LocalizationEngine:
             "roi_size_px": self.current_search_roi_size,
             "rejection_reason": self.last_rejection_reason,
             "rejected_score": self.last_rejected_score,
+            "motion_mode": self.config.motion_mode,
+            "estimated_speed_m_s": self.last_estimated_speed_m_s,
         }
 
     def get_profile_comparison(self) -> Optional[ProfileComparison]:
@@ -290,10 +659,18 @@ class LocalizationEngine:
 
     def localize(self, timestamp: float) -> Optional[EstimatedState]:
         algorithm = self.config.algorithm
-        if (
-            len(self.measurements) < algorithm.min_profile_length
-            or self._profile_distance_m() < algorithm.min_profile_distance_m
-        ):
+        profile_incomplete = len(self.measurements) < algorithm.min_profile_length
+        if self._uses_unknown_speed():
+            profile_incomplete = (
+                profile_incomplete
+                or self._profile_duration_s() < algorithm.min_profile_duration_s
+            )
+        else:
+            profile_incomplete = (
+                profile_incomplete
+                or self._profile_distance_m() < algorithm.min_profile_distance_m
+            )
+        if profile_incomplete:
             self.last_rejection_reason = "profile_incomplete"
             self.last_rejected_score = None
             self.last_profile_comparison = self._build_profile_comparison(
@@ -306,27 +683,38 @@ class LocalizationEngine:
         valid = np.array([m.laser_valid for m in self.measurements])
         baro = np.array([m.baro_msl_m for m in self.measurements])
 
-        # Determine search headings
+        # Heading changes within the window remain in the per-sample offsets.
+        base_heading = float(self.measurements[0].sensor_heading_deg)
         if self.config.sensor.heading_mode == "known_heading":
-            search_headings = [self.relative_offsets[0][2]]  # Just search with reported heading
+            search_headings = [base_heading]
         elif self.config.sensor.heading_mode == "noisy_heading":
-            # Search around reported heading
-            base_h = self.relative_offsets[0][2]
             unc = self.config.sensor.heading_uncertainty_deg
-            search_headings = np.arange(base_h - unc, base_h + unc + 0.1, 1.0).tolist()
+            search_headings = np.arange(
+                base_heading - unc,
+                base_heading + unc + 0.1,
+                1.0,
+            ).tolist()
         else:  # unknown_heading
             search_headings = np.arange(0.0, 360.0, 5.0).tolist()  # Every 5 degrees initially
 
         search_bounds = self._search_bounds()
-
-        cands = self.matcher.coarse_to_fine_search(
-            laser,
-            valid,
-            baro,
-            self.relative_offsets,
-            search_headings,
-            search_bounds=search_bounds,
-        )
+        if self._uses_unknown_speed():
+            cands = self._unknown_speed_candidates(
+                laser,
+                valid,
+                baro,
+                search_headings,
+                search_bounds,
+            )
+        else:
+            cands = self.matcher.coarse_to_fine_search(
+                laser,
+                valid,
+                baro,
+                self.relative_offsets,
+                search_headings,
+                search_bounds=search_bounds,
+            )
 
         if not cands:
             self.last_rejection_reason = "no_candidates"
@@ -358,6 +746,7 @@ class LocalizationEngine:
                 return None
             cands = plausible_cands
 
+        speed_confidence_candidates = cands
         quality_cands = [
             candidate for candidate in cands if self._candidate_passes_quality_gate(candidate)
         ]
@@ -379,6 +768,16 @@ class LocalizationEngine:
             cands,
             score_getter=self._candidate_quality_score,
         )
+        speed_confidence = SpeedConfidence(False, None, None, None, None, "unavailable")
+        if self._uses_unknown_speed():
+            speed_confidence = assess_speed_confidence(
+                speed_confidence_candidates,
+                score_margin_threshold=algorithm.speed_ambiguity_score_margin,
+                speed_std_threshold_m_s=algorithm.speed_ambiguity_std_threshold_m_s,
+                top_k=algorithm.speed_ambiguity_top_k,
+                score_getter=self._candidate_quality_score,
+            )
+            is_ambiguous = is_ambiguous or speed_confidence.is_ambiguous
         best = cands[0]
         quality_score = self._candidate_quality_score(best)
         quality_correlation = self._candidate_quality_correlation(best)
@@ -404,23 +803,29 @@ class LocalizationEngine:
                 self._grow_search_roi()
         else:
             self.last_match_pixel = (best.row, best.col)
+            if best.estimated_speed_m_s is not None:
+                self.last_estimated_speed_m_s = best.estimated_speed_m_s
             self.current_search_roi_size = self.base_search_roi_size
             self.recovery_active = False
 
+        profile_status = "ambiguous" if is_ambiguous else "fix"
+        if speed_confidence.is_ambiguous:
+            profile_status = "speed_ambiguous"
         self.last_profile_comparison = self._build_profile_comparison(
             best,
-            "ambiguous" if is_ambiguous else "fix",
+            profile_status,
         )
 
         # `best.row`, `best.col` is the location of the *start* of the window (the oldest point).
         # We want the location of the *current* point (the newest point).
         # The newest point is at relative offset corresponding to the last measurement.
-        last_offset = self.relative_offsets[-1]
+        best_offsets = self._offsets_for_candidate(best)
+        last_offset = best_offsets[-1]
 
         # Need to rotate last_offset by the matched heading difference.
         # Wait, the offset rotation logic is in `rotate_offsets` and is applied during extraction.
         # Let's do it manually for the last point.
-        angle_diff_deg = best.heading_deg - self.relative_offsets[0][2]
+        angle_diff_deg = best.heading_deg - best_offsets[0][2]
         rad = math.radians(angle_diff_deg)
         cos_a = math.cos(rad)
         sin_a = math.sin(rad)
@@ -437,7 +842,9 @@ class LocalizationEngine:
 
         curr_row = best.row + d_row
         curr_col = best.col + d_col
-        curr_h = (last_offset[2] + angle_diff_deg) % 360.0
+        # Compass headings increase clockwise, while the Cartesian offset
+        # rotation above is counter-clockwise.
+        curr_h = (last_offset[2] - angle_diff_deg) % 360.0
 
         curr_x, curr_y = self.ct.pixel_to_world(curr_row, curr_col)
 
@@ -453,6 +860,13 @@ class LocalizationEngine:
             score_margin=margin,
             quality_score=quality_score,
             quality_correlation=quality_correlation,
+            quality_valid_ratio=best.valid_ratio,
+            estimated_speed_m_s=best.estimated_speed_m_s,
+            second_best_speed_m_s=speed_confidence.second_best_speed_m_s,
+            speed_is_ambiguous=speed_confidence.is_ambiguous,
+            speed_score_margin=speed_confidence.score_margin,
+            speed_spread_m_s=speed_confidence.top_speed_std_m_s,
+            speed_confidence=speed_confidence.indicator,
         )
 
 
@@ -567,10 +981,12 @@ class SimulationEngine:
             true_heading_deg=sensor_heading_deg,
             traveled_distance_m=traveled_distance_m,
             dt_s=dt_s,
+            timestamp_s=self.elapsed_s,
+            motion_mode=self.config.motion_mode,
         )
 
         self.localization.add_measurement(m)
-        est = self.localization.localize(self.elapsed_s)
+        est = self.localization.localize(m.timestamp_s)
         self.elapsed_s += dt_s
         self.step_idx += 1
 

@@ -21,6 +21,7 @@ class ProfileCanvas(FigureCanvas):
         "continuity_rejected": "süreklilik reddi",
         "quality_rejected": "kalite reddi",
         "ambiguous": "belirsiz aday",
+        "speed_ambiguous": "hız belirsiz",
         "fix": "en iyi fix",
     }
     STATUS_COLORS = {
@@ -29,6 +30,7 @@ class ProfileCanvas(FigureCanvas):
         "continuity_rejected": "#fab387",
         "quality_rejected": "#f38ba8",
         "ambiguous": "#fab387",
+        "speed_ambiguous": "#fab387",
         "fix": "#a6e3a1",
     }
 
@@ -121,6 +123,8 @@ class ProfileCanvas(FigureCanvas):
             and np.isfinite(comparison.quality_correlation)
         ):
             details.append(f"korr {comparison.quality_correlation:.2f}")
+        if comparison.estimated_speed_m_s is not None:
+            details.append(f"hız {comparison.estimated_speed_m_s:.1f} m/s")
         suffix = f" | {', '.join(details)}" if details else ""
         self.axes.set_title(
             f"Yükseklik profili - {status_text}{suffix}",

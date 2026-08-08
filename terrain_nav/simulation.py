@@ -62,6 +62,10 @@ class LocalizationEngine:
         self.last_profile_measurements: list[Measurement] = []
         self.last_runtime_profile: dict[str, float] = {}
 
+    def close(self) -> None:
+        """Release persistent localization workers."""
+        self.matcher.close()
+
     def _uses_unknown_speed(self) -> bool:
         return self.config.motion_mode == MOTION_MODE_UNKNOWN_CONSTANT_SPEED
 
@@ -1061,6 +1065,8 @@ class LocalizationEngine:
                 "rejected_score": self.last_rejected_score,
                 "motion_mode": self.config.motion_mode,
                 "estimated_speed_m_s": self.last_estimated_speed_m_s,
+                "active_parallel_workers": self.matcher.last_worker_count,
+                "parallel_worker_limit": self.config.algorithm.parallel_workers,
             }
         return {
             "mode": "local_roi",
@@ -1073,6 +1079,8 @@ class LocalizationEngine:
             "rejected_score": self.last_rejected_score,
             "motion_mode": self.config.motion_mode,
             "estimated_speed_m_s": self.last_estimated_speed_m_s,
+            "active_parallel_workers": self.matcher.last_worker_count,
+            "parallel_worker_limit": self.config.algorithm.parallel_workers,
         }
 
     def get_profile_comparison(self) -> Optional[ProfileComparison]:
@@ -1085,6 +1093,7 @@ class LocalizationEngine:
 
     def localize(self, timestamp: float) -> Optional[EstimatedState]:
         started = time.perf_counter()
+        self.matcher.last_worker_count = 0
         timing: dict[str, float] = {
             "coarse_speed_search_ms": 0.0,
             "medium_speed_search_ms": 0.0,
@@ -1430,6 +1439,7 @@ class SimulationEngine:
 
     def close(self) -> None:
         """Release external terrain resources owned by the simulation."""
+        self.localization.close()
         self.terrain.close()
 
     def get_current_state(self) -> Tuple[float, float, float]:

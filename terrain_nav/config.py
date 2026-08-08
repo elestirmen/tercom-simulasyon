@@ -117,6 +117,9 @@ class AlgorithmConfig:
     fine_stride: int = 1
     fine_heading_step_deg: float = 0.5
     refinement_radius_px: int = 20
+    # Number of persistent worker processes used to split large coarse spatial
+    # searches. One keeps the fully serial library/test behavior.
+    parallel_workers: int = 1
 
     # Loss method: rmse, mae, huber
     loss_method: str = "huber"
@@ -144,6 +147,8 @@ class AlgorithmConfig:
     max_match_jump_m: float = 10.0
 
     def __post_init__(self) -> None:
+        if self.parallel_workers < 1:
+            raise ValueError("parallel_workers must be at least 1")
         if self.speed_search_min_m_s <= 0.0:
             raise ValueError("speed_search_min_m_s must be positive")
         if self.speed_search_max_m_s <= self.speed_search_min_m_s:

@@ -1,5 +1,7 @@
 """Regression tests for bounded, low-memory profile search."""
 
+from dataclasses import replace
+
 import numpy as np
 
 from terrain_nav.config import LocalizationConfig
@@ -7,6 +9,52 @@ from terrain_nav.coordinates import CoordinateTransform
 from terrain_nav.matcher import Candidate, ProfileMatcher, evaluate_candidate
 from terrain_nav.sensors import Measurement
 from terrain_nav.simulation import LocalizationEngine
+
+
+def test_parallel_coarse_search_matches_serial_result():
+    rng = np.random.default_rng(19)
+    dem = rng.normal(900.0, 25.0, size=(160, 160)).astype(np.float32)
+    offsets = [(float(index), 0.0, 90.0) for index in range(5)]
+    laser = 1000.0 - dem[73, 81:86].astype(np.float64)
+    valid = np.ones(len(laser), dtype=bool)
+    baro = np.zeros(len(laser), dtype=np.float64)
+    base = LocalizationConfig()
+    base = replace(
+        base,
+        sensor=replace(base.sensor, constant_msl_m=1000.0),
+        algorithm=replace(
+            base.algorithm,
+            min_profile_length=len(laser),
+            loss_method="rmse",
+            top_k=5,
+        ),
+    )
+    serial = ProfileMatcher(base, dem, CoordinateTransform(1.0, 1.0))
+    parallel = ProfileMatcher(
+        replace(base, algorithm=replace(base.algorithm, parallel_workers=2)),
+        dem,
+        CoordinateTransform(1.0, 1.0),
+    )
+
+    try:
+        expected = serial.coarse_search(
+            laser, valid, baro, offsets, [90.0], stride=1
+        )
+        actual = parallel.coarse_search(
+            laser, valid, baro, offsets, [90.0], stride=1
+        )
+    finally:
+        serial.close()
+        parallel.close()
+
+    assert [(candidate.row, candidate.col) for candidate in actual] == [
+        (candidate.row, candidate.col) for candidate in expected
+    ]
+    assert np.allclose(
+        [candidate.score for candidate in actual],
+        [candidate.score for candidate in expected],
+    )
+    assert parallel.last_worker_count == 2
 
 
 def test_roi_uses_same_stride_lattice_as_global_search():

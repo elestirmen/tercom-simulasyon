@@ -2,7 +2,9 @@
 
 import heapq
 import math
-from dataclasses import dataclass
+import warnings
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass, replace
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -10,6 +12,45 @@ import numpy as np
 from terrain_nav.config import LocalizationConfig, LocalizationRuntimeConfig
 from terrain_nav.coordinates import CoordinateTransform
 from terrain_nav.profile import extract_profile_pixels, rotate_offsets
+
+_WORKER_MATCHER: "ProfileMatcher | None" = None
+
+
+def _initialize_matcher_worker(
+    config: LocalizationConfig | LocalizationRuntimeConfig,
+    dem: np.ndarray,
+    ct: CoordinateTransform,
+) -> None:
+    """Initialize one persistent process with its read-only DEM copy."""
+    global _WORKER_MATCHER
+    worker_config = replace(
+        config,
+        algorithm=replace(config.algorithm, parallel_workers=1),
+    )
+    dem.flags.writeable = False
+    _WORKER_MATCHER = ProfileMatcher(worker_config, dem, ct)
+
+
+def _coarse_search_worker(
+    laser_agl: np.ndarray,
+    laser_valid: np.ndarray,
+    baro_msl: np.ndarray,
+    base_offsets: List[Tuple[float, float, float]],
+    search_headings: List[float],
+    stride: int,
+    search_bounds: Tuple[int, int, int, int],
+) -> List["Candidate"]:
+    if _WORKER_MATCHER is None:
+        raise RuntimeError("Parallel matcher worker was not initialized")
+    return _WORKER_MATCHER.coarse_search(
+        laser_agl,
+        laser_valid,
+        baro_msl,
+        base_offsets,
+        search_headings,
+        stride=stride,
+        search_bounds=search_bounds,
+    )
 
 
 @dataclass
@@ -204,6 +245,105 @@ class ProfileMatcher:
         self.config = config
         self.dem = dem
         self.ct = ct
+        self._executor: ProcessPoolExecutor | None = None
+        self._parallel_disabled = False
+        self.last_worker_count = 0
+
+    def close(self) -> None:
+        """Stop persistent coarse-search workers, if they were started."""
+        if self._executor is not None:
+            self._executor.shutdown(wait=True, cancel_futures=True)
+            self._executor = None
+
+    def _ensure_executor(self) -> ProcessPoolExecutor:
+        if self._executor is None:
+            self._executor = ProcessPoolExecutor(
+                max_workers=self.config.algorithm.parallel_workers,
+                initializer=_initialize_matcher_worker,
+                initargs=(self.config, self.dem, self.ct),
+            )
+        return self._executor
+
+    def _parallel_search_bounds(
+        self,
+        stride: int,
+        search_bounds: Optional[Tuple[int, int, int, int]],
+    ) -> List[Tuple[int, int, int, int]]:
+        rows, cols = self.dem.shape
+        row_start, row_end, col_start, col_end = search_bounds or (0, rows, 0, cols)
+        row_start = max(0, min(rows, int(row_start)))
+        row_end = max(row_start, min(rows, int(row_end)))
+        col_start = max(0, min(cols, int(col_start)))
+        col_end = max(col_start, min(cols, int(col_end)))
+        stride = max(1, int(stride))
+        row_count = max(0, math.ceil((row_end - row_start) / stride))
+        col_count = max(0, math.ceil((col_end - col_start) / stride))
+        workers = min(self.config.algorithm.parallel_workers, row_count)
+        # Process dispatch is slower than the serial path for small ROIs.
+        if workers < 2 or row_count * col_count < 20_000:
+            return []
+
+        lattice_rows = [row_start + index * stride for index in range(row_count)]
+        chunks = np.array_split(np.asarray(lattice_rows, dtype=np.int64), workers)
+        return [
+            (int(chunk[0]), min(row_end, int(chunk[-1]) + stride), col_start, col_end)
+            for chunk in chunks
+            if chunk.size
+        ]
+
+    def _parallel_coarse_search(
+        self,
+        laser_agl: np.ndarray,
+        laser_valid: np.ndarray,
+        baro_msl: np.ndarray,
+        base_offsets: List[Tuple[float, float, float]],
+        search_headings: List[float],
+        stride: int,
+        search_bounds: Optional[Tuple[int, int, int, int]],
+    ) -> List[Candidate] | None:
+        if self._parallel_disabled or self.config.algorithm.parallel_workers <= 1:
+            return None
+        bounds = self._parallel_search_bounds(stride, search_bounds)
+        if not bounds:
+            return None
+        try:
+            executor = self._ensure_executor()
+            futures = [
+                executor.submit(
+                    _coarse_search_worker,
+                    laser_agl,
+                    laser_valid,
+                    baro_msl,
+                    base_offsets,
+                    search_headings,
+                    stride,
+                    chunk_bounds,
+                )
+                for chunk_bounds in bounds
+            ]
+            candidates = [candidate for future in futures for candidate in future.result()]
+        except Exception as exc:
+            self.last_worker_count = 1
+            warnings.warn(
+                f"Parallel coarse search failed; continuing serially: {exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            self.close()
+            self._parallel_disabled = True
+            return None
+
+        self.last_worker_count = len(bounds)
+        heading_order = {heading: index for index, heading in enumerate(search_headings)}
+        candidates.sort(
+            key=lambda candidate: (
+                candidate.score,
+                candidate.row,
+                candidate.col,
+                heading_order.get(candidate.heading_deg, len(heading_order)),
+            )
+        )
+        return candidates[: max(0, int(self.config.algorithm.top_k))]
 
     def _pixel_offsets_for_heading(
         self,
@@ -540,6 +680,18 @@ class ProfileMatcher:
         search_bounds: Optional[Tuple[int, int, int, int]] = None,
     ) -> List[Candidate]:
         """Run one coarse spatial pass without medium/fine refinement."""
+        parallel_candidates = self._parallel_coarse_search(
+            laser_agl,
+            laser_valid,
+            baro_msl,
+            base_offsets,
+            search_headings,
+            stride,
+            search_bounds,
+        )
+        if parallel_candidates is not None:
+            return parallel_candidates
+        self.last_worker_count = 1
         if len(search_headings) == 1:
             return self._vectorized_known_altitude_search(
                 laser_agl,
@@ -655,26 +807,15 @@ class ProfileMatcher:
         search_bounds: Optional[Tuple[int, int, int, int]] = None,
     ) -> List[Candidate]:
         # 1. Coarse search
-        if len(search_headings) == 1:
-            coarse_cands = self._vectorized_known_altitude_search(
-                laser_agl,
-                laser_valid,
-                baro_msl,
-                base_offsets,
-                search_headings[0],
-                self.config.algorithm.coarse_stride,
-                search_bounds,
-            )
-        else:
-            coarse_cands = self.exhaustive_search(
-                laser_agl,
-                laser_valid,
-                baro_msl,
-                base_offsets,
-                search_headings,
-                stride=self.config.algorithm.coarse_stride,
-                search_bounds=search_bounds,
-            )
+        coarse_cands = self.coarse_search(
+            laser_agl,
+            laser_valid,
+            baro_msl,
+            base_offsets,
+            search_headings,
+            stride=self.config.algorithm.coarse_stride,
+            search_bounds=search_bounds,
+        )
         if not coarse_cands:
             return []
 

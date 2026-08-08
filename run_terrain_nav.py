@@ -1,6 +1,7 @@
 """Command-line and desktop entry point for TERCOM terrain navigation."""
 
 import argparse
+import os
 from dataclasses import replace
 from pathlib import Path
 
@@ -24,6 +25,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_DEM_PATH = Path(
     r"C:\d_surucusu\visual_navigation\template-matching\karlik_30_cm_bingmap_utm_elevation.tif"
 )
+DEFAULT_PARALLEL_WORKERS = max(1, os.cpu_count() or 1)
 
 
 def _resolve_dem_path(explicit_path: str | None, fast_mode: bool) -> str:
@@ -49,6 +51,7 @@ def build_config(
     motion_mode: str | None = None,
     speed_search_min_m_s: float | None = None,
     speed_search_max_m_s: float | None = None,
+    parallel_workers: int = 1,
 ) -> LocalizationConfig:
     config = LocalizationConfig()
     resolved_dem_path = _resolve_dem_path(dem_path, fast_mode)
@@ -70,6 +73,7 @@ def build_config(
     terrain = replace(config.terrain, **terrain_updates)
 
     algorithm = config.algorithm
+    algorithm = replace(algorithm, parallel_workers=max(1, int(parallel_workers)))
     if search_roi_size_px is not None:
         algorithm = replace(algorithm, search_roi_size_px=max(0, int(search_roi_size_px)))
     speed_updates = {}
@@ -229,6 +233,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--speed-search-min", type=float, metavar="M_S")
     parser.add_argument("--speed-search-max", type=float, metavar="M_S")
     parser.add_argument(
+        "--parallel-workers",
+        type=int,
+        default=DEFAULT_PARALLEL_WORKERS,
+        metavar="N",
+        help="Persistent worker processes for large coarse searches (default: %(default)s)",
+    )
+    parser.add_argument(
         "--optimizer-benchmark",
         "--benchmark-optimizer",
         action="store_true",
@@ -260,6 +271,7 @@ def main() -> None:
         "motion_mode": motion_mode,
         "speed_search_min_m_s": args.speed_search_min,
         "speed_search_max_m_s": args.speed_search_max,
+        "parallel_workers": args.parallel_workers,
     }
     if args.optimizer_benchmark:
         run_optimizer_cli(

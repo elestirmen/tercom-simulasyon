@@ -38,6 +38,10 @@ def test_ui_starts_with_active_map_scope_and_heading_arrow() -> None:
         assert window.cmb_motion_mode.currentData() == "known_distance"
         assert window.lbl_est_speed.text() == "-"
         assert window.lbl_speed_confidence.text() == "-"
+        assert window.lbl_cpu_workers.text() == "0 / 1 işçi (eşleştirme bekleniyor)"
+        assert window.spin_parallel_workers.minimum() == 1
+        assert window.spin_parallel_workers.maximum() == max(1, os.cpu_count() or 1)
+        assert window.spin_parallel_workers.value() == 1
         assert "Yükseklik profili" in window.profile_canvas.axes.get_title()
         assert window.lbl_true_pos.text() != "-"
     finally:
@@ -61,10 +65,26 @@ def test_ui_realistic_noise_toggle_changes_simulation_config() -> None:
         assert window.worker.sim.config.sensor.speed_noise_std_m_s > 0.0
         assert window.worker.sim.config.algorithm.min_profile_distance_m == 40.0
         assert not window.chk_realistic_noise.isEnabled()
+        assert not window.spin_parallel_workers.isEnabled()
     finally:
         window.stop_sim()
         if window.worker is not None:
             window.worker.wait(2000)
+        window.close()
+
+
+def test_ui_parallel_worker_selection_updates_prestart_config() -> None:
+    app = QApplication.instance() or QApplication([])
+    assert app is not None
+    window = MissionControlWindow(build_config(fast_mode=True))
+    try:
+        selected_workers = min(4, window.spin_parallel_workers.maximum())
+        window.spin_parallel_workers.setValue(selected_workers)
+
+        config = window._simulation_config()
+
+        assert config.algorithm.parallel_workers == selected_workers
+    finally:
         window.close()
 
 

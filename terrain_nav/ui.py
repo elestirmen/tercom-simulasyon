@@ -1,5 +1,6 @@
 """PySide6 UI for Terrain Navigation."""
 
+import os
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QPushButton,
+    QSpinBox,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -331,6 +333,18 @@ class MissionControlWindow(QMainWindow):
         self.cmb_motion_mode.setToolTip(
             "Lokalizasyon algoritmasına sağlanan hareket bilgisini seçer."
         )
+        self.spin_parallel_workers = QSpinBox()
+        self.spin_parallel_workers.setRange(1, max(1, os.cpu_count() or 1))
+        self.spin_parallel_workers.setValue(
+            min(
+                self.spin_parallel_workers.maximum(),
+                max(1, incoming_config.algorithm.parallel_workers),
+            )
+        )
+        self.spin_parallel_workers.setSuffix(" işçi")
+        self.spin_parallel_workers.setToolTip(
+            "Büyük kaba harita aramalarında kullanılabilecek en fazla işlemci süreci."
+        )
 
         self.btn_start.clicked.connect(self.start_sim)
         self.btn_stop.clicked.connect(self.stop_sim)
@@ -339,6 +353,8 @@ class MissionControlWindow(QMainWindow):
         ctrl_layout.addWidget(self.chk_realistic_noise)
         ctrl_layout.addWidget(self._create_title("Hareket bilgisi:"))
         ctrl_layout.addWidget(self.cmb_motion_mode)
+        ctrl_layout.addWidget(self._create_title("Başlangıç CPU işçisi:"))
+        ctrl_layout.addWidget(self.spin_parallel_workers)
         ctrl_layout.addWidget(self.btn_start)
         ctrl_layout.addWidget(self.btn_benchmark)
         ctrl_layout.addWidget(self.btn_stop)
@@ -378,6 +394,9 @@ class MissionControlWindow(QMainWindow):
         self.lbl_step = QLabel("-")
         self.lbl_step.setObjectName("metricLabel")
 
+        self.lbl_cpu_workers = QLabel("-")
+        self.lbl_cpu_workers.setObjectName("metricLabel")
+
         self.lbl_true_pos = QLabel("-")
         self.lbl_true_pos.setObjectName("metricLabel")
 
@@ -416,6 +435,7 @@ class MissionControlWindow(QMainWindow):
         self.lbl_ambig.setStyleSheet("color: #a6e3a1;")
 
         tel_layout.addRow(self._create_title("Adım (Step):"), self.lbl_step)
+        tel_layout.addRow(self._create_title("CPU İşçileri:"), self.lbl_cpu_workers)
         tel_layout.addRow(self._create_title("Gerçek Konum (harita X,Y):"), self.lbl_true_pos)
         tel_layout.addRow(self._create_title("Tahmin Konumu (harita X,Y):"), self.lbl_est_pos)
         tel_layout.addRow(self._create_title("Gerçek Yön (Pusula):"), self.lbl_true_heading)
@@ -608,6 +628,17 @@ class MissionControlWindow(QMainWindow):
 
     def _update_search_status(self, status: dict) -> None:
         self.map_canvas.update_search_roi(status.get("draw_bounds"))
+        active_workers = max(0, int(status.get("active_parallel_workers", 0)))
+        worker_limit = max(1, int(status.get("parallel_worker_limit", 1)))
+        if active_workers == 0:
+            worker_state = "eşleştirme bekleniyor"
+        elif active_workers == 1:
+            worker_state = "seri arama"
+        else:
+            worker_state = "paralel arama"
+        self.lbl_cpu_workers.setText(
+            f"{active_workers} / {worker_limit} işçi ({worker_state})"
+        )
         if status["mode"] == "global_search":
             if status.get("phase") == "recovery":
                 message = "Yeniden yakalama: tam kaynak haritada küresel arama"
@@ -666,6 +697,13 @@ class MissionControlWindow(QMainWindow):
         )
         motion_mode = self.cmb_motion_mode.currentData()
         config = replace(config, motion_mode=motion_mode)
+        config = replace(
+            config,
+            algorithm=replace(
+                config.algorithm,
+                parallel_workers=self.spin_parallel_workers.value(),
+            ),
+        )
         if motion_mode == MOTION_MODE_UNKNOWN_CONSTANT_SPEED:
             algorithm = config.algorithm
             if not config.terrain.dem_path and max(
@@ -709,6 +747,7 @@ class MissionControlWindow(QMainWindow):
         self.log_text.append("[SYSTEM] Simülasyon başlatılıyor...")
         self.chk_realistic_noise.setEnabled(False)
         self.cmb_motion_mode.setEnabled(False)
+        self.spin_parallel_workers.setEnabled(False)
         self.btn_benchmark.setEnabled(False)
 
         # Reset paths
@@ -725,6 +764,10 @@ class MissionControlWindow(QMainWindow):
         self.log_text.append(f"[SYSTEM] Sensör modu: {mode_text}.")
         self.log_text.append(
             f"[SYSTEM] Hareket bilgisi: {simulation.config.motion_mode}."
+        )
+        self.log_text.append(
+            "[SYSTEM] Kaba arama: en fazla "
+            f"{simulation.config.algorithm.parallel_workers} paralel işçi süreç."
         )
         self.map_canvas.plot_terrain(simulation.terrain)
         initial_state = simulation.get_current_state()
@@ -770,6 +813,7 @@ class MissionControlWindow(QMainWindow):
         self.log_text.append("[BENCH] Kapsamlı benchmark modu başlatılıyor...")
         self.chk_realistic_noise.setEnabled(False)
         self.cmb_motion_mode.setEnabled(False)
+        self.spin_parallel_workers.setEnabled(False)
         self.btn_start.setEnabled(False)
         self.btn_benchmark.setEnabled(False)
         self.lbl_benchmark.setText("Kapsamlı benchmark çalışıyor...")
@@ -799,6 +843,7 @@ class MissionControlWindow(QMainWindow):
     def on_benchmark_finished(self, result) -> None:
         self.chk_realistic_noise.setEnabled(True)
         self.cmb_motion_mode.setEnabled(True)
+        self.spin_parallel_workers.setEnabled(True)
         self.btn_start.setEnabled(True)
         self.btn_benchmark.setEnabled(True)
         self.benchmark_worker = None
@@ -827,6 +872,7 @@ class MissionControlWindow(QMainWindow):
     def on_benchmark_failed(self, message: str) -> None:
         self.chk_realistic_noise.setEnabled(True)
         self.cmb_motion_mode.setEnabled(True)
+        self.spin_parallel_workers.setEnabled(True)
         self.btn_start.setEnabled(True)
         self.btn_benchmark.setEnabled(True)
         self.benchmark_worker = None
@@ -1001,6 +1047,7 @@ class MissionControlWindow(QMainWindow):
     def on_finished(self):
         self.chk_realistic_noise.setEnabled(True)
         self.cmb_motion_mode.setEnabled(True)
+        self.spin_parallel_workers.setEnabled(True)
         benchmark_running = (
             self.benchmark_worker is not None and self.benchmark_worker.isRunning()
         )

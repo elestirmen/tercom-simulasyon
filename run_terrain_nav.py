@@ -13,6 +13,11 @@ from terrain_nav.config import (
     apply_realistic_noise_mode,
 )
 from terrain_nav.logging_io import save_config, save_results
+from terrain_nav.optimizer import (
+    OptimizerRunConfig,
+    format_optimizer_summary,
+    run_optimizer_benchmark,
+)
 from terrain_nav.simulation import SimulationEngine
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -167,6 +172,36 @@ def run_headless(**config_kwargs) -> None:
         simulation.close()
 
 
+def run_optimizer_cli(
+    *,
+    optimizer_config_limit: int,
+    optimizer_refined_limit: int,
+    optimizer_final_limit: int,
+    optimizer_routes: int,
+    optimizer_sample_spacing: float | None,
+    optimizer_max_updates_per_route: int,
+    output_dir: str | None,
+    **config_kwargs,
+) -> None:
+    print("TERCOM parameter optimizer benchmark calisiyor...")
+    config = build_config(**config_kwargs)
+    run_config = OptimizerRunConfig(
+        initial_config_limit=max(1, int(optimizer_config_limit)),
+        refined_config_limit=max(1, int(optimizer_refined_limit)),
+        final_config_limit=max(1, int(optimizer_final_limit)),
+        max_routes=max(2, int(optimizer_routes)),
+        benchmark_sample_spacing_m=optimizer_sample_spacing,
+        max_updates_per_route=max(0, int(optimizer_max_updates_per_route)),
+    )
+    result = run_optimizer_benchmark(
+        config,
+        run_config=run_config,
+        progress_callback=print,
+        output_dir=Path(output_dir) if output_dir else PROJECT_ROOT / "results",
+    )
+    print(format_optimizer_summary(result))
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="TERCOM terrain-profile navigation")
     parser.add_argument("--headless", action="store_true", help="Run without the desktop UI")
@@ -193,6 +228,19 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--speed-search-min", type=float, metavar="M_S")
     parser.add_argument("--speed-search-max", type=float, metavar="M_S")
+    parser.add_argument(
+        "--optimizer-benchmark",
+        "--benchmark-optimizer",
+        action="store_true",
+        help="Run the deterministic parameter optimization benchmark",
+    )
+    parser.add_argument("--optimizer-configs", type=int, default=64, metavar="N")
+    parser.add_argument("--optimizer-refined-configs", type=int, default=12, metavar="N")
+    parser.add_argument("--optimizer-final-configs", type=int, default=10, metavar="N")
+    parser.add_argument("--optimizer-routes", type=int, default=12, metavar="N")
+    parser.add_argument("--optimizer-sample-spacing", type=float, metavar="M")
+    parser.add_argument("--optimizer-max-updates-per-route", type=int, default=0, metavar="N")
+    parser.add_argument("--optimizer-output", metavar="DIR")
     return parser.parse_args()
 
 
@@ -213,6 +261,18 @@ def main() -> None:
         "speed_search_min_m_s": args.speed_search_min,
         "speed_search_max_m_s": args.speed_search_max,
     }
+    if args.optimizer_benchmark:
+        run_optimizer_cli(
+            optimizer_config_limit=args.optimizer_configs,
+            optimizer_refined_limit=args.optimizer_refined_configs,
+            optimizer_final_limit=args.optimizer_final_configs,
+            optimizer_routes=args.optimizer_routes,
+            optimizer_sample_spacing=args.optimizer_sample_spacing,
+            optimizer_max_updates_per_route=args.optimizer_max_updates_per_route,
+            output_dir=args.optimizer_output,
+            **config_kwargs,
+        )
+        return
     if args.headless:
         run_headless(**config_kwargs)
         return

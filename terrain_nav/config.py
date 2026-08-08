@@ -105,6 +105,8 @@ class AlgorithmConfig:
     speed_search_medium_step_m_s: float = 1.0
     speed_search_fine_step_m_s: float = 0.2
     speed_search_keep_hypotheses: int = 3
+    speed_tracking_half_range_m_s: float = 1.0
+    speed_tracking_step_m_s: float = 1.0
     speed_ambiguity_top_k: int = 5
     speed_ambiguity_score_margin: float = 0.05
     speed_ambiguity_std_threshold_m_s: float = 2.0
@@ -129,6 +131,11 @@ class AlgorithmConfig:
 
     # Online localization window
     profile_window_size: int = 100  # How many past measurements to use
+    # Optional localization profile reduction. ``raw`` preserves the current
+    # online behavior; optimizer runs can select uniform or interpolated profile
+    # points without shrinking the retained measurement history.
+    profile_resampling_mode: str = "raw"
+    profile_points: int = 0
     # After the first reliable match, restrict the next search around it.
     # Zero disables the optimization and keeps a global search every step.
     search_roi_size_px: int = 0
@@ -145,6 +152,8 @@ class AlgorithmConfig:
             "speed_search_coarse_step_m_s",
             "speed_search_medium_step_m_s",
             "speed_search_fine_step_m_s",
+            "speed_tracking_half_range_m_s",
+            "speed_tracking_step_m_s",
         ):
             if getattr(self, name) <= 0.0:
                 raise ValueError(f"{name} must be positive")
@@ -162,6 +171,12 @@ class AlgorithmConfig:
             raise ValueError(
                 "max_profile_duration_s must be greater than min_profile_duration_s"
             )
+        if self.profile_resampling_mode not in {"raw", "uniform", "interpolated"}:
+            raise ValueError(
+                "profile_resampling_mode must be one of: raw, uniform, interpolated"
+            )
+        if self.profile_points < 0:
+            raise ValueError("profile_points cannot be negative")
 
 
 @dataclass(frozen=True)

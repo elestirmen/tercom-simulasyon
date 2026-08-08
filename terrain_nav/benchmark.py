@@ -288,6 +288,7 @@ def run_benchmark_suite(
     max_routes: int = 32,
     dense_sample_count: int | None = None,
     wrong_fix_threshold_m: float = DEFAULT_WRONG_FIX_THRESHOLD_M,
+    auto_scale_algorithm: bool = True,
     progress_callback: ProgressCallback | None = None,
     stop_requested: StopCallback | None = None,
     output_dir: str | Path | None = None,
@@ -301,7 +302,11 @@ def run_benchmark_suite(
     terrain = TerrainManager(config.terrain)
     try:
         config = _with_safe_constant_altitude(config, terrain)
-        algorithm = _benchmark_algorithm(config, terrain.nav_dem.shape)
+        algorithm = (
+            _benchmark_algorithm(config, terrain.nav_dem.shape)
+            if auto_scale_algorithm
+            else config.algorithm
+        )
         config = dataclass_replace(config, algorithm=algorithm)
         ct = CoordinateTransform(terrain.dx, terrain.dy)
         matcher = ProfileMatcher(config, terrain.get_navigation_dem(copy=False), ct)

@@ -528,6 +528,123 @@ class ProfileMatcher:
             pixel_offset_cache,
         )
 
+    def coarse_search(
+        self,
+        laser_agl: np.ndarray,
+        laser_valid: np.ndarray,
+        baro_msl: np.ndarray,
+        base_offsets: List[Tuple[float, float, float]],
+        search_headings: List[float],
+        *,
+        stride: int,
+        search_bounds: Optional[Tuple[int, int, int, int]] = None,
+    ) -> List[Candidate]:
+        """Run one coarse spatial pass without medium/fine refinement."""
+        if len(search_headings) == 1:
+            return self._vectorized_known_altitude_search(
+                laser_agl,
+                laser_valid,
+                baro_msl,
+                base_offsets,
+                search_headings[0],
+                stride,
+                search_bounds,
+            )
+        return self.exhaustive_search(
+            laser_agl,
+            laser_valid,
+            baro_msl,
+            base_offsets,
+            search_headings,
+            stride=stride,
+            search_bounds=search_bounds,
+        )
+
+    def refine_around_candidates(
+        self,
+        laser_agl: np.ndarray,
+        laser_valid: np.ndarray,
+        baro_msl: np.ndarray,
+        base_offsets: List[Tuple[float, float, float]],
+        seeds: List[Candidate],
+        search_headings: List[float],
+        *,
+        stride: int,
+        radius_px: int,
+        search_bounds: Optional[Tuple[int, int, int, int]] = None,
+        fine_heading_refinement: bool = False,
+    ) -> List[Candidate]:
+        """Search local neighborhoods around already-ranked candidates."""
+        top_k = max(0, int(self.config.algorithm.top_k))
+        if top_k == 0 or not seeds:
+            return []
+
+        rows, cols = self.dem.shape
+        bounds = search_bounds or (0, rows, 0, cols)
+        stride = max(1, int(stride))
+        radius = max(0, int(radius_px))
+        pixel_offset_cache: Dict[float, np.ndarray] = {}
+        candidate_heap: List[Tuple[float, int, Candidate]] = []
+        sequence = 0
+
+        for seed in seeds:
+            r_start = max(bounds[0], 0, int(seed.row - radius))
+            r_end = min(bounds[1], rows, int(seed.row + radius + 1))
+            c_start = max(bounds[2], 0, int(seed.col - radius))
+            c_end = min(bounds[3], cols, int(seed.col + radius + 1))
+            if r_start >= r_end or c_start >= c_end:
+                continue
+
+            headings = [seed.heading_deg]
+            if len(search_headings) > 1 and fine_heading_refinement:
+                step = self.config.algorithm.fine_heading_step_deg
+                headings = [seed.heading_deg - step, seed.heading_deg, seed.heading_deg + step]
+            elif len(search_headings) > 1:
+                headings = sorted(
+                    search_headings,
+                    key=lambda heading: abs(
+                        ((heading - seed.heading_deg + 180.0) % 360.0) - 180.0
+                    ),
+                )[:5]
+
+            for row in range(r_start, r_end, stride):
+                for col in range(c_start, c_end, stride):
+                    for heading in headings:
+                        cand = evaluate_candidate(
+                            row,
+                            col,
+                            heading,
+                            self.dem,
+                            laser_agl,
+                            laser_valid,
+                            baro_msl,
+                            base_offsets,
+                            self.ct,
+                            self.config,
+                            pixel_offsets=self._pixel_offsets_for_heading(
+                                pixel_offset_cache, base_offsets, heading
+                            ),
+                            compute_all_metrics=False,
+                        )
+                        if cand is not None:
+                            self._retain_top_candidate(
+                                candidate_heap,
+                                cand,
+                                sequence,
+                                top_k,
+                            )
+                            sequence += 1
+
+        candidates = self._sorted_heap_candidates(candidate_heap)
+        return self._hydrate_candidates(
+            candidates,
+            laser_agl,
+            laser_valid,
+            baro_msl,
+            base_offsets,
+            pixel_offset_cache,
+        )
+
     def coarse_to_fine_search(
         self,
         laser_agl: np.ndarray,

@@ -26,14 +26,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from terrain_nav.benchmark import (
-    BenchmarkResult,
-    benchmark_overview_rows,
-    benchmark_route_summary_rows,
-    benchmark_variant_summary_rows,
-    format_benchmark_summary,
-    run_benchmark_suite,
-)
 from terrain_nav.config import (
     MOTION_MODE_KNOWN_DISTANCE,
     MOTION_MODE_MEASURED_SPEED,
@@ -41,6 +33,14 @@ from terrain_nav.config import (
     LocalizationConfig,
     apply_realistic_noise_mode,
     uses_realistic_noise_mode,
+)
+from terrain_nav.optimizer import (
+    OptimizerRunConfig,
+    format_optimizer_summary,
+    optimizer_final_rows,
+    optimizer_overview_rows,
+    optimizer_top_configuration_rows,
+    run_optimizer_benchmark,
 )
 from terrain_nav.rendering import MapCanvas, ProfileCanvas
 from terrain_nav.simulation import MotionOutOfBoundsError, SimulationEngine
@@ -250,8 +250,9 @@ class BenchmarkWorker(QThread):
 
     def run(self):
         try:
-            result = run_benchmark_suite(
+            result = run_optimizer_benchmark(
                 self.config,
+                run_config=OptimizerRunConfig(),
                 progress_callback=self.progress.emit,
                 stop_requested=lambda: self._stop_requested,
                 output_dir=self.output_dir,
@@ -448,6 +449,16 @@ class MissionControlWindow(QMainWindow):
         self.benchmark_tabs.addTab(self.benchmark_overview_table, "Özet")
         self.benchmark_tabs.addTab(self.benchmark_variant_table, "Vektör")
         self.benchmark_tabs.addTab(self.benchmark_route_table, "Rota")
+        self.benchmark_variant_table.setColumnCount(8)
+        self.benchmark_variant_table.setHorizontalHeaderLabels(
+            ["Config", "Rol", "False", "Correct", "Precision", "P95", "Speed MAE", "Sure"]
+        )
+        self.benchmark_route_table.setColumnCount(8)
+        self.benchmark_route_table.setHorizontalHeaderLabels(
+            ["Config", "Final False", "Final Correct", "Precision", "P95", "Speed MAE", "Track P95", "Skor"]
+        )
+        self.benchmark_tabs.setTabText(1, "Top Config")
+        self.benchmark_tabs.setTabText(2, "Final")
         benchmark_layout.addWidget(self.benchmark_tabs)
         benchmark_group.setLayout(benchmark_layout)
         sidebar_layout.addWidget(benchmark_group)
@@ -534,48 +545,41 @@ class MissionControlWindow(QMainWindow):
         ):
             table.setRowCount(0)
 
-    def _update_benchmark_tables(self, result: BenchmarkResult) -> None:
+    def _update_benchmark_tables(self, result) -> None:
         overview_rows = [
             [row["metric"], row["value"]]
-            for row in benchmark_overview_rows(result)
+            for row in optimizer_overview_rows(result)
         ]
         self._populate_benchmark_table(self.benchmark_overview_table, overview_rows)
 
         variant_rows = []
-        for row in benchmark_variant_summary_rows(result):
+        for row in optimizer_top_configuration_rows(result):
             variant_rows.append(
                 [
-                    row["variant"],
-                    row["mode"],
-                    row["points"],
-                    self._format_count_rate(row["fix_count"], row["runs"], row["fix_rate_pct"]),
-                    self._format_count_rate(
-                        row["wrong_fix_count"],
-                        row["runs"],
-                        row["wrong_fix_rate_pct"],
-                    ),
-                    row["median_error_m"],
-                    row["p95_error_m"],
-                    row["mean_elapsed_ms"],
+                    row["config_id"],
+                    row["selection_role"],
+                    row["false_fix_rate"],
+                    row["correct_fix_rate"],
+                    row["fix_precision"],
+                    row["p95_position_error_m"],
+                    row["speed_mae_m_s"],
+                    row["mean_runtime_ms"],
                 ]
             )
         self._populate_benchmark_table(self.benchmark_variant_table, variant_rows)
 
         route_rows = []
-        for row in benchmark_route_summary_rows(result):
+        for row in optimizer_final_rows(result):
             route_rows.append(
                 [
-                    row["route"],
-                    self._format_count_rate(row["fix_count"], row["runs"], row["fix_rate_pct"]),
-                    self._format_count_rate(
-                        row["wrong_fix_count"],
-                        row["runs"],
-                        row["wrong_fix_rate_pct"],
-                    ),
-                    row["best_variant"],
-                    row["median_error_m"],
-                    row["p95_error_m"],
-                    row["mean_elapsed_ms"],
+                    row["config_id"],
+                    row["false_fix_rate"],
+                    row["correct_fix_rate"],
+                    row["fix_precision"],
+                    row["p95_position_error_m"],
+                    row["speed_mae_m_s"],
+                    row["p95_tracking_time_ms"],
+                    row["score"],
                 ]
             )
         self._populate_benchmark_table(self.benchmark_route_table, route_rows)
@@ -792,22 +796,22 @@ class MissionControlWindow(QMainWindow):
         scrollbar = self.log_text.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
-    def on_benchmark_finished(self, result: BenchmarkResult) -> None:
+    def on_benchmark_finished(self, result) -> None:
         self.chk_realistic_noise.setEnabled(True)
         self.cmb_motion_mode.setEnabled(True)
         self.btn_start.setEnabled(True)
         self.btn_benchmark.setEnabled(True)
         self.benchmark_worker = None
-        summary_text = format_benchmark_summary(result)
+        summary_text = format_optimizer_summary(result)
         self.lbl_benchmark.setText(summary_text)
         self._update_benchmark_tables(result)
         self.log_text.append("[BENCH] Benchmark tamamlandı.")
 
-        if result.best_profile is not None:
+        if getattr(result, "best_profile", None) is not None:
             self.profile_canvas.update_profile(result.best_profile)
 
         route_name = self._benchmark_display_route(result)
-        if route_name is not None:
+        if route_name is not None and hasattr(result, "route_paths"):
             self.true_path = result.route_paths[route_name]
             self.est_path = []
             self.map_canvas.update_search_roi(None)
@@ -830,7 +834,9 @@ class MissionControlWindow(QMainWindow):
         self.log_text.append(f"[BENCH] Hata: {message}")
 
     @staticmethod
-    def _benchmark_display_route(result: BenchmarkResult) -> str | None:
+    def _benchmark_display_route(result) -> str | None:
+        if not hasattr(result, "summaries"):
+            return None
         fixed = [
             summary
             for summary in result.summaries

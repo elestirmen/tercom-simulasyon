@@ -18,7 +18,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QPushButton,
-    QSpinBox,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -333,16 +332,20 @@ class MissionControlWindow(QMainWindow):
         self.cmb_motion_mode.setToolTip(
             "Lokalizasyon algoritmasına sağlanan hareket bilgisini seçer."
         )
-        self.spin_parallel_workers = QSpinBox()
-        self.spin_parallel_workers.setRange(1, max(1, os.cpu_count() or 1))
-        self.spin_parallel_workers.setValue(
-            min(
-                self.spin_parallel_workers.maximum(),
-                max(1, incoming_config.algorithm.parallel_workers),
+        self.cmb_parallel_workers = QComboBox()
+        available_workers = max(1, os.cpu_count() or 1)
+        for worker_count in range(1, available_workers + 1):
+            self.cmb_parallel_workers.addItem(
+                f"{worker_count} çekirdek",
+                worker_count,
             )
+        selected_workers = min(
+            available_workers,
+            max(1, incoming_config.algorithm.parallel_workers),
         )
-        self.spin_parallel_workers.setSuffix(" işçi")
-        self.spin_parallel_workers.setToolTip(
+        selected_worker_index = self.cmb_parallel_workers.findData(selected_workers)
+        self.cmb_parallel_workers.setCurrentIndex(selected_worker_index)
+        self.cmb_parallel_workers.setToolTip(
             "Büyük kaba harita aramalarında kullanılabilecek en fazla işlemci süreci."
         )
 
@@ -353,8 +356,8 @@ class MissionControlWindow(QMainWindow):
         ctrl_layout.addWidget(self.chk_realistic_noise)
         ctrl_layout.addWidget(self._create_title("Hareket bilgisi:"))
         ctrl_layout.addWidget(self.cmb_motion_mode)
-        ctrl_layout.addWidget(self._create_title("Başlangıç CPU işçisi:"))
-        ctrl_layout.addWidget(self.spin_parallel_workers)
+        ctrl_layout.addWidget(self._create_title("İşlemci çekirdeği:"))
+        ctrl_layout.addWidget(self.cmb_parallel_workers)
         ctrl_layout.addWidget(self.btn_start)
         ctrl_layout.addWidget(self.btn_benchmark)
         ctrl_layout.addWidget(self.btn_stop)
@@ -701,7 +704,7 @@ class MissionControlWindow(QMainWindow):
             config,
             algorithm=replace(
                 config.algorithm,
-                parallel_workers=self.spin_parallel_workers.value(),
+                parallel_workers=int(self.cmb_parallel_workers.currentData()),
             ),
         )
         if motion_mode == MOTION_MODE_UNKNOWN_CONSTANT_SPEED:
@@ -747,7 +750,7 @@ class MissionControlWindow(QMainWindow):
         self.log_text.append("[SYSTEM] Simülasyon başlatılıyor...")
         self.chk_realistic_noise.setEnabled(False)
         self.cmb_motion_mode.setEnabled(False)
-        self.spin_parallel_workers.setEnabled(False)
+        self.cmb_parallel_workers.setEnabled(False)
         self.btn_benchmark.setEnabled(False)
 
         # Reset paths
@@ -813,7 +816,7 @@ class MissionControlWindow(QMainWindow):
         self.log_text.append("[BENCH] Kapsamlı benchmark modu başlatılıyor...")
         self.chk_realistic_noise.setEnabled(False)
         self.cmb_motion_mode.setEnabled(False)
-        self.spin_parallel_workers.setEnabled(False)
+        self.cmb_parallel_workers.setEnabled(False)
         self.btn_start.setEnabled(False)
         self.btn_benchmark.setEnabled(False)
         self.lbl_benchmark.setText("Kapsamlı benchmark çalışıyor...")
@@ -843,7 +846,7 @@ class MissionControlWindow(QMainWindow):
     def on_benchmark_finished(self, result) -> None:
         self.chk_realistic_noise.setEnabled(True)
         self.cmb_motion_mode.setEnabled(True)
-        self.spin_parallel_workers.setEnabled(True)
+        self.cmb_parallel_workers.setEnabled(True)
         self.btn_start.setEnabled(True)
         self.btn_benchmark.setEnabled(True)
         self.benchmark_worker = None
@@ -872,7 +875,7 @@ class MissionControlWindow(QMainWindow):
     def on_benchmark_failed(self, message: str) -> None:
         self.chk_realistic_noise.setEnabled(True)
         self.cmb_motion_mode.setEnabled(True)
-        self.spin_parallel_workers.setEnabled(True)
+        self.cmb_parallel_workers.setEnabled(True)
         self.btn_start.setEnabled(True)
         self.btn_benchmark.setEnabled(True)
         self.benchmark_worker = None
@@ -1047,7 +1050,7 @@ class MissionControlWindow(QMainWindow):
     def on_finished(self):
         self.chk_realistic_noise.setEnabled(True)
         self.cmb_motion_mode.setEnabled(True)
-        self.spin_parallel_workers.setEnabled(True)
+        self.cmb_parallel_workers.setEnabled(True)
         benchmark_running = (
             self.benchmark_worker is not None and self.benchmark_worker.isRunning()
         )

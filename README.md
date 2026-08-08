@@ -35,7 +35,7 @@ python run_terrain_nav.py --parallel-workers 4
 Masaüstü ve headless girişleri, büyük kaba harita aramalarını varsayılan olarak
 sistemde görünen tüm mantıksal işlemcilere dağıtır. Küçük ROI aramaları seri
 kalır; böylece süreçler arası iletişim maliyeti küçük hesapları yavaşlatmaz.
-Başlangıç ekranındaki `Başlangıç CPU işçisi` alanından bu sınır simülasyon
+Başlangıç ekranındaki `İşlemci çekirdeği` açılır listesinden bu sınır simülasyon
 başlamadan seçilebilir. Tamamen seri çalıştırmak için arayüzde `1` veya komut
 satırında `--parallel-workers 1` kullanılabilir.
 

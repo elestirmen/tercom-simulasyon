@@ -25,7 +25,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_DEM_PATH = Path(
     r"C:\d_surucusu\visual_navigation\template-matching\karlik_30_cm_bingmap_utm_elevation.tif"
 )
-DEFAULT_PARALLEL_WORKERS = max(1, os.cpu_count() or 1)
+DEFAULT_PARALLEL_WORKERS = min(4, max(1, os.cpu_count() or 1))
 
 
 def _resolve_dem_path(explicit_path: str | None, fast_mode: bool) -> str:

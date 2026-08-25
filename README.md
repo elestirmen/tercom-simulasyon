@@ -1,156 +1,395 @@
-# TERCOM Terrain Navigation
+# GNSS-Yoksun Seyrüsefer için TERCOM Arazi Profili Lokalizasyon Simülatörü
 
-Bu depo, GNSS olmadan çalışan DEM ve lazer-altimetre tabanlı terrain-profile
-lokalizasyon simülatörünü içerir. Aktif uygulamanın tek giriş noktası
-`run_terrain_nav.py` dosyasıdır.
+Bu proje, GNSS erişiminin bulunmadığı koşullarda bir hava aracının konumunu
+Sayısal Yükseklik Modeli (DEM), lazer altimetre, barometrik irtifa ve hareket
+bilgilerinden kestirmeyi amaçlayan deneysel bir **Terrain Contour Matching
+(TERCOM)** simülatörüdür. Yazılım; kontrollü sentetik deneyleri, GeoTIFF tabanlı
+gerçek arazi çalışmalarını, belirsizlik analizi ile kalite kapılarını ve
+tekrarlanabilir parametre optimizasyonunu tek bir araştırma altyapısında birleştirir.
+
+> **Araştırma yazılımı notu:** Bu depo bir uçuş-kritik seyrüsefer sistemi değildir.
+> Üretilen konumlar ve performans ölçümleri yalnızca simülasyon ve araştırma
+> amacıyla değerlendirilmelidir.
+
+## İçindekiler
+
+- [Araştırma amacı ve kapsam](#araştırma-amacı-ve-kapsam)
+- [Yöntem](#yöntem)
+- [Temel özellikler](#temel-özellikler)
+- [Kurulum](#kurulum)
+- [Hızlı başlangıç](#hızlı-başlangıç)
+- [Deney modları](#deney-modları)
+- [Çıktılar ve değerlendirme ölçütleri](#çıktılar-ve-değerlendirme-ölçütleri)
+- [Tekrarlanabilir deney protokolü](#tekrarlanabilir-deney-protokolü)
+- [Proje yapısı](#proje-yapısı)
+- [Doğrulama](#doğrulama)
+- [Varsayımlar ve sınırlılıklar](#varsayımlar-ve-sınırlılıklar)
+- [Atıf, veri ve lisans](#atıf-veri-ve-lisans)
+
+## Araştırma amacı ve kapsam
+
+Projenin temel araştırma sorusu, **zamana bağlı bir arazi-yükseklik profilinin
+referans DEM üzerinde ne ölçüde güvenilir ve hesaplama açısından uygulanabilir
+biçimde eşleştirilebileceğidir**. Bu kapsamda aşağıdaki problemler incelenebilir:
+
+- bilinen veya bilinmeyen mutlak uçuş irtifası altında profil eşleştirme,
+- ideal ve gürültülü sensör varsayımlarının lokalizasyon başarısına etkisi,
+- kat edilen mesafe bilinmediğinde konum ve sabit hızın birlikte kestirimi,
+- global arama ile yerel ilgi bölgesi (ROI) takibi arasındaki doğruluk–süre dengesi,
+- düz ya da tekrarlayan topoğrafyada konum/hız belirsizliğinin saptanması,
+- kalite eşikleri ile yanlış `FIX` oranı arasındaki ödünleşim,
+- kaba harita aramasının çok işlemli yürütülmesi ve çalışma süresi analizi.
+
+Çalışma, hem küçük ve deterministik bir sentetik DEM hem de kullanıcı tarafından
+sağlanan coğrafi referanslı GeoTIFF DEM üzerinde çalışabilir. Harici veri bu depoya
+dahil değildir.
+
+## Yöntem
+
+### Lokalizasyon akışı
+
+```text
+Gerçek/sentetik DEM
+        │
+        ├──► uçuş ve sensör benzetimi ──► lazer/barometre/hareket ölçümleri
+        │                                      │
+        │                                      ▼
+        └──────────────────────────────► kayan arazi profili
+                                               │
+                                               ▼
+                                      kaba → orta → ince arama
+                                               │
+                                               ▼
+                                  kalite ve belirsizlik denetimi
+                                               │
+                         ┌─────────────────────┼─────────────────────┐
+                         ▼                     ▼                     ▼
+                       FIX                 AMBIGUOUS       QUALITY INSUFFICIENT
+```
+
+Her ölçüm için lazer irtifası ile aday DEM yüksekliği, seçilen irtifa modeline
+göre beklenen arazi profiline dönüştürülür. Aday konumlar varsayılan olarak Huber
+kayıp fonksiyonu ile puanlanır; düşük puan daha iyi uyumu belirtir. Eşleştirme
+sonrası inlier RMSE, korelasyon ve geçerli örnek oranı denetlenir. Birbirine yakın
+puanlı fakat uzamsal olarak dağınık adaylar belirsiz kabul edilir ve zorla konum
+çözümü üretilmez.
+
+### İrtifa modelleri
+
+| Mod | Lokalizasyonun kullandığı bilgi | Araştırma amacı |
+|---|---|---|
+| `known_msl_altitude` | Sabit ve bilinen MSL irtifası | İdeal referans senaryosu |
+| `unknown_constant_msl_altitude` | Profil boyunca sabit fakat bilinmeyen MSL irtifası | Mutlak irtifa bilgisiz eşleştirme |
+| `barometric_altitude` | Bias ve gürültü içerebilen zamana bağlı barometre ölçümü | Daha gerçekçi sensör senaryosu |
+
+### Hareket bilgisi modelleri
+
+| Mod | Lokalizasyona verilen hareket bilgisi |
+|---|---|
+| `known_distance` | Kusursuz kat edilen mesafe; varsayılan ideal mod |
+| `measured_speed` | Gürültülü hız ölçümünden türetilen mesafe |
+| `unknown_constant_speed` | Mesafe/hız verilmez; konum ve sabit hız birlikte aranır |
+
+`unknown_constant_speed` modunda her hız hipotezi için zaman farkından
+`mesafe = hız × zaman` ilişkisi kurulur. Her örneğin kendi yön bilgisi
+kullanıldığından dönüşlü, L ve zikzak rotaların geometrisi korunur. Varsayılan hız
+arama aralığı `5–30 m/s`; kaba, orta ve ince adımlar sırasıyla `5`, `1` ve
+`0.2 m/s`'dir.
+
+## Temel özellikler
+
+- PySide6 tabanlı manuel görev ve telemetri arayüzü,
+- küçük ve deterministik sentetik arazi üretimi,
+- GeoTIFF DEM okuma ve fiziksel kapsamı koruyan yeniden örnekleme,
+- lazer, barometre, pusula ve hız sensörü hata modelleri,
+- bilinen yön veya coarse-to-fine yön araması,
+- Huber/RMSE/MAE temelli profil eşleştirme,
+- global arama ve isteğe bağlı, kademeli genişleyen ROI kurtarma akışı,
+- yanlış yerel ankrajı önleyen mutlak kalite kapıları,
+- sabit fakat bilinmeyen hızın konumla birlikte kestirimi,
+- büyük kaba aramalar için kalıcı çok işlemli işçi havuzu,
+- validasyon/final rota ayrımlı deterministik parametre optimizasyonu,
+- CSV, JSON, JSONL ve XLSX biçimlerinde deney kayıtları.
 
 ## Kurulum
 
+### Gereksinimler
+
+- Windows, Linux veya macOS,
+- Python `3.10–3.13`,
+- masaüstü arayüzü için grafik oturumu,
+- harici arazi deneyi için GeoTIFF biçiminde bir DEM.
+
+PowerShell ile önerilen kurulum:
+
 ```powershell
+git clone <depo-adresi>
+Set-Location "tercom-simulasyon"
+
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 ```
 
-## Kullanım
+Yalnızca çalışma zamanı bağımlılıkları gerekiyorsa:
 
 ```powershell
-# Masaüstü arayüzü ve varsayılan Karlık GeoTIFF'i
-python run_terrain_nav.py
-
-# Küçük sentetik DEM ile hızlı UI
-python run_terrain_nav.py --fast
-
-# Headless doğrulama
-python run_terrain_nav.py --headless --fast
-
-# Gerçekçi sensör gürültüsü modu
-python run_terrain_nav.py --realistic-noise
-
-# Başka bir GeoTIFF
-python run_terrain_nav.py --dem "C:\path\terrain.tif"
-
-# Kaba harita aramasında kullanılacak işlemci sayısı
-python run_terrain_nav.py --parallel-workers 4
+python -m pip install -e .
 ```
 
-Masaüstü ve headless girişleri, büyük kaba harita aramalarını varsayılan olarak
-en fazla 4 işçi sürece dağıtır. Küçük ROI aramaları seri kalır; böylece süreçler
-arası iletişim maliyeti küçük hesapları yavaşlatmaz.
-Başlangıç ekranındaki `İşlemci çekirdeği` açılır listesinden bu sınır simülasyon
-başlamadan seçilebilir. Tamamen seri çalıştırmak için arayüzde `1` veya komut
-satırında `--parallel-workers 1` kullanılabilir.
+Kurulum `matplotlib`, `numpy`, `PySide6` ve `rasterio` paketlerini yükler.
+Geliştirme seçeneği ayrıca `pytest` ve `ruff` içerir.
 
-Arayüz manuel çalışır: `W/S/A/D` 100 metre hareket, `Q/E` 15 derece dönüş
-uygular. Manuel hareket sırasında sensör/lokalizasyon profili varsayılan olarak
-20 metrede bir örneklenir; yani tek bir 100 metrelik komut profil grafiğine
-yaklaşık 5 yeni kayıt ekler. Değerler `RouteConfig` üzerinden değiştirilebilir.
-Arayüzdeki `Gerçekçi sensör gürültüsü` seçeneği, simülasyon başlamadan
-`--realistic-noise` ile aynı sensör modunu açıp kapatır.
+## Hızlı başlangıç
 
-## Harita kapsamları
-
-- Tam kaynak harita; İHA uçuşunun, sensör örneklemesinin ve lokalizasyonun ortak
-  kapsamıdır. İHA yalnızca gerçek kaynak harita sınırında durdurulur.
-- Varsayılan olarak profil her adımda bütün haritada aranır; yerel ROI yalnızca
-  `--search-roi-size` sıfırdan büyük verildiğinde hız optimizasyonu olarak açılır.
-- Turuncu ROI, bu seçenek açıkken güvenilir eşleşmeden sonra kullanılan yerel
-  arama alanıdır.
-- ROI açıkken eşleşme kaybolursa arama alanı kademeli büyür; eski ankraj geçersiz
-  olduğunda sistem ölçüm profilini koruyarak yeniden bütün haritada arama yapar.
-- Manuel dönüşlerde her ölçüm, kendisine ulaşan hareket vektörüyle profile
-  eklenir; böylece L ve zikzak rotaların geometrisi korunur.
-- Inlier RMSE, inlier korelasyonu veya geçerli örnek oranı yetersiz bir aday
-  konum `FIX` olarak kabul edilmez ve yanlış bir yerel ROI ankrajı oluşturamaz.
-  Kalite kapısı, profilin en kötü küçük yüzdesini dışarıda bırakarak tekil lazer
-  outlier'larının uzun süreli `KALİTE YETERSİZ` üretmesini engeller.
-
-Dış DEM'in tamamı, uzun kenarı varsayılan olarak 2048 hücre olacak şekilde
-yeniden örneklenir. Böylece bellek kullanımı sınırlı kalırken haritanın hiçbir
-bölümü lokalizasyon dışında bırakılmaz. `--dem-target-size` ve
-`--search-roi-size` seçenekleri çözünürlük ile yerel ROI boyutunu kontrol eder.
-`--search-roi-size 0` ve varsayılan ayar ROI'yi kapatır.
-
-## Sensör modları
-
-Varsayılan mod, mevcut regresyonları korumak için idealize edilmiştir:
-`known_msl_altitude`, bilinen pusula yönü, lazer altimetre ve kusursuz hız/mesafe
-bilgisiyle çalışır.
-
-`--realistic-noise` modu, aynı GPS'siz eşleştirme akışını daha gerçekçi ölçüm
-varsayımlarıyla çalıştırır: mutlak MSL irtifa doğrudan bilinmez, barometrede
-sabit bilinmeyen bias ve gürültü vardır, lokalizasyona verilen hareket mesafesi
-ise gürültülü hız ölçümünden türetilir. Bu mod, kısa profille yanlış global
-eşleşmeye kilitlenmemek için dış DEM koşularında varsayılan olarak en az
-800 metre ölçülmüş profil uzunluğu bekler ve hız gürültüsünün çok uzun profilde
-birikmesini azaltmak için kayan profili yaklaşık 2 km ile sınırlar. Manuel UI'da
-20 metrelik örnekleme aralığıyla bu, aramada ve profil grafiğinde son yaklaşık
-100 ölçüm kaydının tutulması anlamına gelir. Pusula bu modda da bilinen yön
-olarak kalır; heading gürültüsü ayrıca
-`SensorConfig.heading_mode` üzerinden ayarlanabilir.
-
-## Speed-free localization
-
-Hareket bilgisi üç moddan biriyle seçilir:
-
-- `known_distance`: lokalizasyon kusursuz kat edilen mesafeyi kullanır ve
-  geriye uyumlu varsayılan moddur.
-- `measured_speed`: sensör hızından türetilen, gürültülü mesafeyi kullanır.
-- `unknown_constant_speed`: hız veya kat edilen mesafe almaz; barometre, lazer,
-  pusula, ölçüm zamanları, DEM ve fiziksel hız sınırlarıyla çalışır.
-
-Hızsız mod komut satırından iki eşdeğer biçimde açılabilir:
+Aktif uygulamanın giriş noktası `run_terrain_nav.py` dosyasıdır.
 
 ```powershell
-python run_terrain_nav.py --unknown-speed
-python run_terrain_nav.py --motion-mode unknown_constant_speed
+# Küçük sentetik DEM ile hızlı masaüstü deneyi
+python run_terrain_nav.py --fast
 
-# Tekrarlanabilir küçük sentetik/headless koşu
+# Arayüzsüz, tekrarlanabilir sentetik kontrol
+python run_terrain_nav.py --headless --fast
+
+# Kullanıcı tarafından sağlanan GeoTIFF DEM
+python run_terrain_nav.py --dem "C:\veri\arazi.tif"
+
+# Tüm seçenekler
+python run_terrain_nav.py --help
+```
+
+Program parametresiz başlatıldığında, kaynak kodda tanımlı yerel varsayılan DEM
+mevcutsa onu kullanır; dosya bulunamazsa sentetik araziye geri döner. Akademik
+tekrarlanabilirlik için DEM yolunun her koşuda `--dem` ile açıkça verilmesi önerilir.
+
+Masaüstü arayüzündeki manuel denetimler:
+
+| Tuş | İşlev |
+|---|---|
+| `W` / `S` | İleri / geri hareket |
+| `A` / `D` | Sola / sağa yanal hareket |
+| `Q` / `E` | Sola / sağa dönüş |
+
+Varsayılan manuel hareket komutu `100 m`, dönüş komutu `15°` ve profil örnekleme
+aralığı `20 m`'dir. Bu değerler `RouteConfig` üzerinden değiştirilebilir.
+
+## Deney modları
+
+### İdeal sensör modu
+
+```powershell
+python run_terrain_nav.py --headless --fast
+```
+
+Bu referans senaryosu bilinen MSL irtifası, yön ve kusursuz hareket mesafesi
+kullanır. Gürültülü senaryolarla karşılaştırma için kontrol grubu niteliğindedir.
+
+### Gerçekçi sensör gürültüsü
+
+```powershell
+python run_terrain_nav.py --realistic-noise --dem "C:\veri\arazi.tif"
+```
+
+Bu ön ayar mutlak irtifa yerine bias/gürültü içeren barometreyi ve gürültülü hız
+ölçümünü kullanır. Harici DEM koşularında kısa profille yanlış global kilitlenmeyi
+azaltmak için en az `800 m` ölçülmüş profil beklenir; biriken odometri hatasını
+sınırlamak için kayan profil yaklaşık `2000 m` ile sınırlandırılır. Pusula yönü bu
+ön ayarda bilinen kabul edilir; yön gürültüsü ayrıca `SensorConfig.heading_mode`
+ile yapılandırılabilir.
+
+### Hız bilgisi olmadan lokalizasyon
+
+```powershell
 python run_terrain_nav.py --headless --fast --unknown-speed
 
-# Fiziksel hız aralığını sınırla
+# Eşdeğer açık gösterim
+python run_terrain_nav.py --motion-mode unknown_constant_speed
+
+# Fiziksel hız aralığını sınırlandırma
 python run_terrain_nav.py --unknown-speed --speed-search-min 8 --speed-search-max 24
 ```
 
-Masaüstü arayüzündeki `Hareket bilgisi` menüsünden de `Hız bilinmiyor` seçilebilir.
-Canlı telemetri, tahmini hızı ve hız güvenini gösterir.
+Bu mod kayan profil boyunca hızın sabit olduğunu varsayar. Simülatör aracı hareket
+ettirmek için gerçek hızı bilse de lokalizasyon katmanına gerçek rota başlangıcı,
+hızı veya kat edilen mesafe aktarılmaz. Gerçek hız yalnızca sonuç aşamasında
+`speed_error_m_s` metriğini hesaplamak için kullanılır.
 
-Bu mod, kayan profil penceresi boyunca hızın sabit fakat bilinmeyen olduğunu
-varsayar. Her aday hız için ardışık zaman farkı `dt` ile `v * dt` hareketi
-hesaplanır; her ölçümün kendi pusula yönü kullanıldığı için L, zikzak ve dönüşlü
-rotalar korunur. Konum ve hız hipotezi birlikte DEM üzerinde aranır. Hız gridinin
-varsayılanları:
+### Global arama ve ROI
 
-- aralık: `5.0 .. 30.0 m/s`
-- kaba adım: `5.0 m/s`
-- orta adım: `1.0 m/s`
-- ince adım: `0.2 m/s`
-- minimum profil süresi: `30 s`
-- maksimum profil süresi: `120 s`
+Varsayılan `--search-roi-size 0` ayarı ROI'yi kapatır ve her güncellemede tüm
+haritayı arar. ROI yalnızca açıkça etkinleştirilmelidir:
 
-Simülatör uçağı hareket ettirmek için gerçek hızı bilir; ancak
-`unknown_constant_speed` ölçümlerinde `traveled_distance_m` ve
-`measured_speed_m_s` alanları boş bırakılır. Lokalizasyon çalışma konfigürasyonu
-rota başlangıcını, rota hızını veya diğer ground-truth rota alanlarını içermez.
-Gerçek hız yalnızca sonuç CSV'sindeki `speed_error_m_s` değerlendirme metriği
-için logger katmanında kullanılır.
-
-Sonuçlar; tahmini konum ve hızın yanında eşleşme skoru, inlier RMSE,
-korelasyon, geçerli örnek oranı, konumsal belirsizlik, ikinci en iyi hız,
-hız skor marjı, Top-K hız yayılımı ve hız güvenini içerir.
-
-> Düz veya tekrarlayan topoğrafyada konum ve hız birlikte gözlemlenebilir
-> olmayabilir. Bu durumda sistemin zorla `FIX` üretmesi yerine `AMBIGUOUS` veya
-> `QUALITY INSUFFICIENT` sonucu vermesi beklenir. Çok kısa profiller de hız
-> tahmini için yeterli arazi bilgisi taşımayabilir.
-
-## Yapı
-
-```text
-run_terrain_nav.py       CLI ve UI giriş noktası
-terrain_nav/             aktif simülasyon ve lokalizasyon paketi
-tests/                   yalnızca aktif paketin regresyon testleri
+```powershell
+python run_terrain_nav.py --dem "C:\veri\arazi.tif" --search-roi-size 512
 ```
 
-`terrain_nav` paketi; konfigürasyon, koordinat dönüşümleri, DEM yönetimi,
-sensör modeli, profil çıkarımı, coarse-to-fine eşleştirme, simülasyon, çizim ve
-PySide6 arayüzünden oluşur. Sentetik test DEM'i paket içinde üretilir; başka bir
-depoya çalışma zamanı bağımlılığı yoktur.
+Güvenilir bir eşleşmeden sonra yerel ROI kullanılır. Eşleşme kaybolursa arama alanı
+kademeli genişletilir; eski ankraj geçersiz olduğunda ölçüm profili korunarak
+global aramaya dönülür. ROI bir doğruluk yöntemi değil, hesaplama maliyetini
+azaltmayı amaçlayan izleme optimizasyonudur.
+
+### Paralel kaba arama
+
+```powershell
+# Varsayılan üst sınır: en fazla 4 işçi süreç
+python run_terrain_nav.py --parallel-workers 4
+
+# Seri yürütme
+python run_terrain_nav.py --parallel-workers 1
+```
+
+Büyük global aramalar satır bantlarına ayrılarak kalıcı işçi süreçlerinde
+yürütülür. Küçük harita ve ROI aramaları süreçler arası iletişim maliyetinden
+kaçınmak için seri kalabilir. İşçi sayısı deney ortamı ve DEM boyutuyla birlikte
+raporlanmalıdır.
+
+### Parametre optimizasyonu
+
+```powershell
+# Varsayılan deterministik optimizasyon planı
+python run_terrain_nav.py --optimizer-benchmark --fast
+
+# Kısa bir yöntem kontrolü
+python run_terrain_nav.py --optimizer-benchmark --fast `
+  --optimizer-configs 8 `
+  --optimizer-refined-configs 4 `
+  --optimizer-final-configs 3 `
+  --optimizer-routes 4 `
+  --optimizer-max-updates-per-route 10
+```
+
+Optimizasyon; aday konfigürasyon üretimi, validasyon/final rota ayrımı, Pareto
+analizi ve güvenli/hızlı/doğru/dengeli seçimleri içerir. Küçük sentetik koşuda
+seçilen bir konfigürasyon, harici DEM üzerinde ayrıca doğrulanmadan üretim ayarı
+olarak yorumlanmamalıdır.
+
+## Çıktılar ve değerlendirme ölçütleri
+
+Arayüzsüz koşu, `results/` altında aşağıdaki dosyaları üretir:
+
+- `config.json`: koşunun sensör, algoritma, arazi ve rota konfigürasyonu,
+- `results.csv`: adım bazında gerçek ve kestirilen durum ile kalite ölçütleri.
+
+Optimizasyon çalışması zaman damgalı `*_summary.csv`, `*_details.jsonl` ve
+`*.xlsx` dosyaları üretir. XLSX çalışma kitabı genel özet, en iyi
+konfigürasyonlar ve final değerlendirme tablolarını içerir.
+
+Başlıca ölçütler:
+
+| Ölçüt | Yorum |
+|---|---|
+| Konum hatası (m) | Gerçek ve kestirilen konum arasındaki Öklid uzaklığı; düşük iyidir |
+| Inlier RMSE (m) | Aykırı örnekler kırpıldıktan sonraki profil uyum hatası; düşük iyidir |
+| Korelasyon | Ölçülen ve beklenen profil biçimi uyumu; yüksek iyidir |
+| Geçerli örnek oranı | DEM sınırları içinde değerlendirilebilen profil payı; yüksek iyidir |
+| Correct FIX oranı | Kabul edilen ve hata eşiği içinde kalan çözümlerin tüm güncellemelere oranı |
+| False FIX oranı | Kabul edildiği halde hata eşiğini aşan çözümlerin tüm güncellemelere oranı |
+| FIX precision | Doğru `FIX` sayısının kabul edilen tüm `FIX` sayısına oranı |
+| P95 konum hatası | Kabul edilen çözümlerde konum hatasının 95. yüzdelik değeri |
+| Hız MAE (m/s) | Bilinmeyen hız deneylerinde mutlak hız hatası ortalaması |
+| Çalışma süresi (ms) | Global ilk çözüm ve takip güncellemelerinin hesaplama maliyeti |
+
+Arayüzdeki “Eşleşme Skoru” gerçek konum hatası değildir; profil uyum hatasını
+gösterir ve düşük değer daha iyidir. “Arama Dağılımı” adayların raster uzayındaki
+yayılımından türetilir; fiziksel metre olarak yorumlanacaksa DEM piksel boyutuyla
+dönüştürülmelidir.
+
+## Tekrarlanabilir deney protokolü
+
+Akademik karşılaştırmalarda aşağıdaki bilgiler sonuçlarla birlikte kaydedilmelidir:
+
+1. Git commit kimliği ve Python sürümü.
+2. DEM kaynağı, koordinat referans sistemi, hücre boyutu, kapsamı ve dosya özeti
+   (örneğin SHA-256).
+3. `config.json` ile tüm sensör, rota ve algoritma parametreleri.
+4. Rastgelelik tohumu (`TerrainConfig.seed`; varsayılan `42`).
+5. Çalıştırma komutu, işletim sistemi, CPU modeli ve `--parallel-workers` değeri.
+6. Başarı eşiği, değerlendirilen rota/güncelleme sayısı ve reddedilen çözüm sayısı.
+7. Ortalama yanında medyan/P95 hata, yanlış `FIX` oranı ve çalışma süresi.
+
+Önerilen asgari kontrol:
+
+```powershell
+git rev-parse HEAD
+python --version
+python run_terrain_nav.py --headless --fast --parallel-workers 1
+python -m pytest
+```
+
+Sentetik ve harici DEM sonuçları ayrı tablolar halinde raporlanmalıdır. Kısa smoke
+testleri yalnızca yazılım akışını doğrular; bilimsel performans kanıtı sayılmaz.
+
+## Proje yapısı
+
+```text
+run_terrain_nav.py           CLI ve masaüstü uygulamasının giriş noktası
+terrain_nav/
+├── config.py                Deney, sensör ve algoritma konfigürasyonları
+├── terrain.py               Sentetik/GeoTIFF DEM yönetimi
+├── sensors.py               Sensör benzetimi
+├── profile.py               Rota ve arazi profili çıkarımı
+├── matcher.py               Coarse-to-fine profil eşleştirme
+├── confidence.py            Konum ve hız belirsizliği değerlendirmesi
+├── simulation.py            Simülasyon ve lokalizasyon yaşam döngüsü
+├── benchmark.py             Profil varyantı benchmark altyapısı
+├── optimizer.py             Deterministik parametre optimizasyonu
+├── logging_io.py            JSON ve CSV kayıtları
+├── rendering.py             Harita/profil çizimleri
+└── ui.py                    PySide6 masaüstü arayüzü
+tests/                       Aktif paket için regresyon testleri
+results/                     Çalışma zamanı çıktıları
+```
+
+Lokalizasyonun görebildiği çalışma konfigürasyonu, ground-truth rota alanlarından
+ayrılmıştır. Bu sınır, algoritmanın simülasyon gerçeğini yanlışlıkla kullanmasını
+önlemeyi amaçlar.
+
+## Doğrulama
+
+Kod değişikliklerinden sonra önerilen doğrulama yüzeyi:
+
+```powershell
+python -m pytest
+python -m ruff check .
+python -m compileall -q run_terrain_nav.py terrain_nav tests
+python run_terrain_nav.py --help
+python run_terrain_nav.py --headless --fast
+```
+
+Testler; koordinat dönüşümleri, sensör modelleri, bilinen/bilinmeyen irtifa,
+bilinmeyen hız, yön araması, ROI kurtarma, seri–paralel eşdeğerliği, harici DEM,
+arayüz konfigürasyonu, benchmark ve optimizasyon akışlarını kapsar.
+
+## Varsayımlar ve sınırlılıklar
+
+- Sistem bir simülatördür; gerçek uçuş donanımı, zaman senkronizasyonu ve aviyonik
+  emniyet gereksinimleri modellenmez.
+- Profil eşleştirme, DEM doğruluğu ve çözünürlüğü ile sensör/harita datumlarının
+  tutarlılığına duyarlıdır.
+- Düz veya tekrarlayan topoğrafya, konum ve hızın birlikte gözlemlenebilirliğini
+  azaltabilir; bu durumda `AMBIGUOUS` ya da `QUALITY INSUFFICIENT` beklenen bir
+  sonuçtur.
+- `unknown_constant_speed`, kayan profil penceresi boyunca sabit hız varsayar;
+  ivmeli uçuşlar için model genişletilmelidir.
+- DEM'in uzun kenarı varsayılan olarak `2048` hücreye örneklenir. Bu işlem fiziksel
+  kapsamı korur ancak yüksek frekanslı topoğrafik ayrıntıyı azaltabilir.
+- ROI ve paralel işçi sayısı bilimsel parametrelerle birlikte kaydedilmeli; farklı
+  donanım ve DEM boyutlarında süre sonuçları yeniden ölçülmelidir.
+- Varsayılan eşikler tüm coğrafyalara genellenmiş, saha kalibrasyonlu değerler
+  olarak değerlendirilmemelidir.
+
+## Atıf, veri ve lisans
+
+Bu depoda henüz `CITATION.cff`, DOI veya yazarlar tarafından onaylanmış bir kaynakça
+kaydı bulunmamaktadır. Akademik kullanımda en azından depo adı, kullanılan sürümün
+commit kimliği ve erişim tarihi belirtilmelidir. Resmî atıf bilgisi eklendiğinde bu
+bölüm güncellenmelidir.
+
+Harici DEM dosyaları depoya dahil değildir. Kullanılan veri kümesinin lisansı,
+üreticisi, tarihçesi, koordinat referans sistemi ve ön işleme adımları ilgili
+yayında ayrıca belirtilmelidir.
+
+Depoda açık bir lisans dosyası bulunmadığından, kodun yeniden kullanımı veya
+dağıtımı için otomatik olarak izin verildiği varsayılmamalıdır. Yayınlamadan önce
+uygun bir `LICENSE` dosyasının proje sahipleri tarafından eklenmesi önerilir.

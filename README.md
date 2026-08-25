@@ -1,4 +1,339 @@
+# TERCOM Terrain Contour Matching Localization Simulator for GNSS-Denied Navigation
+
+[🇹🇷 Türkçe versiyonu için tıklayınız](#türkçe)
+
+This project is an experimental **Terrain Contour Matching (TERCOM)** simulator aimed at estimating the position of an aircraft in environments without GNSS access using a Digital Elevation Model (DEM), laser altimeter, barometric altitude, and motion data. The software combines controlled synthetic experiments, GeoTIFF-based real terrain studies, uncertainty analysis with quality gates, and reproducible parameter optimization into a single research infrastructure.
+
+> **Research software note:** This repository is not a flight-critical navigation system. The generated positions and performance metrics should only be evaluated for simulation and research purposes.
+
+## Table of Contents
+
+- [Research Purpose and Scope](#research-purpose-and-scope)
+- [Methodology](#methodology)
+- [Key Features](#key-features)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Experiment Modes](#experiment-modes)
+- [Outputs and Evaluation Metrics](#outputs-and-evaluation-metrics)
+- [Reproducible Experiment Protocol](#reproducible-experiment-protocol)
+- [Project Structure](#project-structure)
+- [Validation](#validation)
+- [Assumptions and Limitations](#assumptions-and-limitations)
+- [Citation, Data, and License](#citation-data-and-license)
+
+## Research Purpose and Scope
+
+The main research question of the project is **to what extent a time-dependent terrain-elevation profile can be reliably and computationally feasibly matched on a reference DEM**. In this context, the following problems can be investigated:
+
+- Profile matching under known or unknown absolute flight altitude,
+- The impact of ideal and noisy sensor assumptions on localization success,
+- Joint estimation of position and constant speed when the traveled distance is unknown,
+- The accuracy-time trade-off between global search and local Region of Interest (ROI) tracking,
+- Detection of position/speed uncertainty in flat or repetitive topography,
+- The trade-off between quality thresholds and false `FIX` rate,
+- Multiprocessing execution of coarse map searches and runtime analysis.
+
+The study can run on both a small and deterministic synthetic DEM or a user-provided geo-referenced GeoTIFF DEM. External data is not included in this repository.
+
+## Methodology
+
+### Localization Flow
+
+```text
+Real/Synthetic DEM
+        │
+        ├──► flight and sensor simulation ──► laser/barometer/motion measurements
+        │                                      │
+        │                                      ▼
+        └──────────────────────────────► sliding terrain profile
+                                               │
+                                               ▼
+                                      coarse → medium → fine search
+                                               │
+                                               ▼
+                                  quality and uncertainty check
+                                               │
+                         ┌─────────────────────┼─────────────────────┐
+                         ▼                     ▼                     ▼
+                       FIX                 AMBIGUOUS       QUALITY INSUFFICIENT
+```
+
+For each measurement, the laser altitude and candidate DEM elevation are converted into an expected terrain profile according to the selected altitude model. Candidate positions are scored by default with the Huber loss function; a lower score indicates a better fit. After matching, inlier RMSE, correlation, and valid sample ratio are checked. Candidates with close scores but spatially scattered are considered uncertain, and a position solution is not forced.
+
+### Altitude Models
+
+| Mode | Information used by localization | Research purpose |
+|---|---|---|
+| `known_msl_altitude` | Constant and known MSL altitude | Ideal reference scenario |
+| `unknown_constant_msl_altitude` | Constant but unknown MSL altitude along the profile | Matching without absolute altitude |
+| `barometric_altitude` | Time-dependent barometer measurement with bias and noise | More realistic sensor scenario |
+
+### Motion Information Models
+
+| Mode | Motion information provided to localization |
+|---|---|
+| `known_distance` | Perfect traveled distance; default ideal mode |
+| `measured_speed` | Distance derived from noisy speed measurement |
+| `unknown_constant_speed` | Distance/speed not provided; position and constant speed are searched jointly |
+
+In `unknown_constant_speed` mode, the relationship `distance = speed × time` is established from the time difference for each speed hypothesis. Since each sample uses its own heading information, the geometry of turning, L-shaped, and zigzag routes is preserved. The default speed search range is `5–30 m/s`; coarse, medium, and fine steps are `5`, `1`, and `0.2 m/s`, respectively.
+
+## Key Features
+
+- PySide6-based manual task and telemetry interface,
+- Small and deterministic synthetic terrain generation,
+- GeoTIFF DEM reading and physical extent-preserving resampling,
+- Laser, barometer, compass, and speed sensor error models,
+- Known heading or coarse-to-fine heading search,
+- Huber/RMSE/MAE based profile matching,
+- Global search and optional, progressively expanding ROI recovery flow,
+- Absolute quality gates preventing false local anchoring,
+- Joint estimation of constant but unknown speed with position,
+- Persistent multiprocessing worker pool for large coarse searches,
+- Deterministic parameter optimization with validation/final route separation,
+- Experiment logging in CSV, JSON, JSONL, and XLSX formats.
+
+## Installation
+
+### Requirements
+
+- Windows, Linux, or macOS,
+- Python `3.10–3.13`,
+- Graphical session for desktop interface,
+- A DEM in GeoTIFF format for external terrain experiments.
+
+Recommended installation with PowerShell:
+
+```powershell
+git clone <repository-url>
+cd tercom-simulasyon
+
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
+```
+
+If only runtime dependencies are needed:
+
+```powershell
+python -m pip install -e .
+```
+
+Installation will install `matplotlib`, `numpy`, `PySide6`, and `rasterio` packages. The development option also includes `pytest` and `ruff`.
+
+## Quick Start
+
+The entry point of the active application is the `run_terrain_nav.py` file.
+
+```powershell
+# Fast desktop experiment with small synthetic DEM
+python run_terrain_nav.py --fast
+
+# Headless, reproducible synthetic control
+python run_terrain_nav.py --headless --fast
+
+# User-provided GeoTIFF DEM
+python run_terrain_nav.py --dem "C:\data\terrain.tif"
+
+# All options
+python run_terrain_nav.py --help
+```
+
+When started without parameters, the program uses the local default DEM defined in the source code if available; if not found, it falls back to the synthetic terrain. For academic reproducibility, it is recommended to explicitly provide the DEM path with `--dem` on every run.
+
+Manual controls in the desktop interface:
+
+| Key | Function |
+|---|---|
+| `W` / `S` | Move forward / backward |
+| `A` / `D` | Move left / right (lateral) |
+| `Q` / `E` | Turn left / right |
+
+The default manual movement command is `100 m`, turn command is `15°`, and profile sampling interval is `20 m`. These values can be modified via `RouteConfig`.
+
+## Experiment Modes
+
+### Ideal Sensor Mode
+
+```powershell
+python run_terrain_nav.py --headless --fast
+```
+
+This reference scenario uses known MSL altitude, heading, and perfect traveled distance. It serves as a control group for comparison with noisy scenarios.
+
+### Realistic Sensor Noise
+
+```powershell
+python run_terrain_nav.py --realistic-noise --dem "C:\data\terrain.tif"
+```
+
+This preset uses a barometer containing bias/noise instead of absolute altitude and a noisy speed measurement. In external DEM runs, at least an `800 m` measured profile is expected to reduce false global locking with short profiles; the sliding profile is limited to approximately `2000 m` to bound accumulated odometry error. Compass heading is considered known in this preset; heading noise can be further configured with `SensorConfig.heading_mode`.
+
+### Localization Without Speed Information
+
+```powershell
+python run_terrain_nav.py --headless --fast --unknown-speed
+
+# Equivalent explicit notation
+python run_terrain_nav.py --motion-mode unknown_constant_speed
+
+# Restricting the physical speed range
+python run_terrain_nav.py --unknown-speed --speed-search-min 8 --speed-search-max 24
+```
+
+This mode assumes the speed is constant along the sliding profile. Although the simulator knows the true speed to move the vehicle, the true route start, speed, or traveled distance are not passed to the localization layer. The true speed is only used at the final stage to calculate the `speed_error_m_s` metric.
+
+### Global Search and ROI
+
+The default `--search-roi-size 0` setting disables ROI and searches the entire map at every update. ROI must be explicitly enabled:
+
+```powershell
+python run_terrain_nav.py --dem "C:\data\terrain.tif" --search-roi-size 512
+```
+
+After a reliable match, the local ROI is used. If the match is lost, the search area is progressively expanded; when the old anchor becomes invalid, the measurement profile is preserved and it reverts to global search. ROI is not an accuracy method but a tracking optimization aimed at reducing computational cost.
+
+### Parallel Coarse Search
+
+```powershell
+# Default upper limit: maximum 4 worker processes
+python run_terrain_nav.py --parallel-workers 4
+
+# Serial execution
+python run_terrain_nav.py --parallel-workers 1
+```
+
+Large global searches are divided into row bands and executed in persistent worker processes. Small map and ROI searches can remain serial to avoid inter-process communication overhead. The number of workers should be reported along with the experiment environment and DEM size.
+
+### Parameter Optimization
+
+```powershell
+# Default deterministic optimization plan
+python run_terrain_nav.py --optimizer-benchmark --fast
+
+# A short method check
+python run_terrain_nav.py --optimizer-benchmark --fast `
+  --optimizer-configs 8 `
+  --optimizer-refined-configs 4 `
+  --optimizer-final-configs 3 `
+  --optimizer-routes 4 `
+  --optimizer-max-updates-per-route 10
+```
+
+Optimization involves candidate configuration generation, validation/final route separation, Pareto analysis, and safe/fast/accurate/balanced selections. A configuration selected in a small synthetic run should not be interpreted as a production setting without being additionally validated on an external DEM.
+
+## Outputs and Evaluation Metrics
+
+The headless run generates the following files under `results/`:
+
+- `config.json`: sensor, algorithm, terrain, and route configuration of the run,
+- `results.csv`: true and estimated state along with quality metrics per step.
+
+The optimization run produces timestamped `*_summary.csv`, `*_details.jsonl`, and `*.xlsx` files. The XLSX workbook contains an overall summary, best configurations, and final evaluation tables.
+
+Key metrics:
+
+| Metric | Comment |
+|---|---|
+| Position error (m) | Euclidean distance between true and estimated position; lower is better |
+| Inlier RMSE (m) | Profile fit error after clipping outlier samples; lower is better |
+| Correlation | Expected and measured profile shape match; higher is better |
+| Valid sample ratio | Proportion of the profile that can be evaluated within DEM bounds; higher is better |
+| Correct FIX rate | Ratio of accepted solutions that remain within the error threshold to all updates |
+| False FIX rate | Ratio of accepted solutions that exceed the error threshold to all updates |
+| FIX precision | Ratio of true `FIX` count to all accepted `FIX` count |
+| P95 position error | 95th percentile value of position error in accepted solutions |
+| Speed MAE (m/s) | Mean absolute speed error in unknown speed experiments |
+| Runtime (ms) | Computational cost of global initial solution and tracking updates |
+
+The "Match Score" in the interface is not the actual position error; it indicates the profile fit error, and a lower value is better. "Search Dispersion" is derived from the spread of candidates in raster space; if it is to be interpreted in physical meters, it must be converted with the DEM pixel size.
+
+## Reproducible Experiment Protocol
+
+For academic comparisons, the following information should be recorded alongside the results:
+
+1. Git commit ID and Python version.
+2. DEM source, coordinate reference system, cell size, extent, and file hash (e.g., SHA-256).
+3. All sensor, route, and algorithm parameters via `config.json`.
+4. Randomness seed (`TerrainConfig.seed`; default `42`).
+5. Run command, OS, CPU model, and `--parallel-workers` value.
+6. Success threshold, number of routes/updates evaluated, and number of rejected solutions.
+7. Median/P95 error, false `FIX` rate, and runtime alongside the mean.
+
+Recommended minimum check:
+
+```powershell
+git rev-parse HEAD
+python --version
+python run_terrain_nav.py --headless --fast --parallel-workers 1
+python -m pytest
+```
+
+Synthetic and external DEM results should be reported in separate tables. Short smoke tests only validate the software flow; they do not count as scientific performance evidence.
+
+## Project Structure
+
+```text
+run_terrain_nav.py           Entry point for CLI and desktop application
+terrain_nav/
+├── config.py                Experiment, sensor, and algorithm configurations
+├── terrain.py               Synthetic/GeoTIFF DEM management
+├── sensors.py               Sensor simulation
+├── profile.py               Route and terrain profile extraction
+├── matcher.py               Coarse-to-fine profile matching
+├── confidence.py            Position and speed uncertainty evaluation
+├── simulation.py            Simulation and localization lifecycle
+├── benchmark.py             Profile variant benchmark infrastructure
+├── optimizer.py             Deterministic parameter optimization
+├── logging_io.py            JSON and CSV logging
+├── rendering.py             Map/profile renderings
+└── ui.py                    PySide6 desktop interface
+tests/                       Regression tests for the active package
+results/                     Runtime outputs
+```
+
+The working configuration visible to the localization is separated from ground-truth route fields. This boundary aims to prevent the algorithm from inadvertently using simulation truth.
+
+## Validation
+
+Recommended validation surface after code changes:
+
+```powershell
+python -m pytest
+python -m ruff check .
+python -m compileall -q run_terrain_nav.py terrain_nav tests
+python run_terrain_nav.py --help
+python run_terrain_nav.py --headless --fast
+```
+
+Tests cover coordinate transformations, sensor models, known/unknown altitude, unknown speed, heading search, ROI recovery, serial–parallel equivalence, external DEM, interface configuration, benchmark, and optimization flows.
+
+## Assumptions and Limitations
+
+- The system is a simulator; real flight hardware, time synchronization, and avionics safety requirements are not modeled.
+- Profile matching is sensitive to DEM accuracy and resolution, and consistency of sensor/map datums.
+- Flat or repetitive topography can reduce the joint observability of position and speed; in this case, `AMBIGUOUS` or `QUALITY INSUFFICIENT` is an expected outcome.
+- `unknown_constant_speed` assumes constant speed across the sliding profile window; the model must be extended for accelerated flights.
+- The long edge of the DEM is sampled to `2048` cells by default. This preserves physical extent but may reduce high-frequency topographic detail.
+- The ROI and parallel worker count should be recorded with scientific parameters; timing results should be remeasured on different hardware and DEM sizes.
+- Default thresholds are generalized across geographies and should not be considered field-calibrated values.
+
+## Citation, Data, and License
+
+This repository does not yet contain a `CITATION.cff`, DOI, or author-approved bibliographic record. For academic use, at a minimum, the repository name, commit ID of the used version, and access date should be stated. This section should be updated once official citation information is added.
+
+External DEM files are not included in the repository. The license, producer, history, coordinate reference system, and preprocessing steps of the dataset used must be additionally stated in the related publication.
+
+Since there is no explicit license file in the repository, it should not be assumed that reuse or distribution of the code is automatically permitted. It is recommended that a proper `LICENSE` file be added by the project owners before publication.
+
+---
+
+<a id="türkçe"></a>
 # GNSS-Yoksun Seyrüsefer için TERCOM Arazi Profili Lokalizasyon Simülatörü
+
+*[Read this in English](#tercom-terrain-contour-matching-localization-simulator-for-gnss-denied-navigation)*
+
 
 Bu proje, GNSS erişiminin bulunmadığı koşullarda bir hava aracının konumunu
 Sayısal Yükseklik Modeli (DEM), lazer altimetre, barometrik irtifa ve hareket

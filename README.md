@@ -5,7 +5,7 @@
 [![Python](https://img.shields.io/badge/python-3.10%E2%80%933.13-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Version](https://img.shields.io/badge/version-0.3.0-0A7BBB)](pyproject.toml)
 [![UI](https://img.shields.io/badge/UI-PySide6-41CD52?logo=qt&logoColor=white)](https://doc.qt.io/qtforpython/)
-[![License](https://img.shields.io/badge/license-not%20specified-lightgrey)](#citation-data-and-license)
+[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-green)](#citation-data-and-license)
 
 **English** · [Türkçe](#turkce)
 
@@ -710,7 +710,7 @@ This repository does not yet contain a `CITATION.cff`, a DOI, or an author-appro
 
 External DEM files are not included in the repository. The license, producer, provenance, coordinate reference system, and preprocessing steps of the dataset used must be stated separately in the related publication.
 
-Since the repository contains no explicit license file, it should not be assumed that reuse or redistribution of the code is automatically permitted. Adding a proper `LICENSE` file before publication is recommended.
+This project is dual-licensed under the **MIT License** and the **Apache License 2.0**. You may choose either license when using, modifying, or distributing this code. See the [LICENSE](LICENSE) file for the complete terms of both licenses.
 
 ---
 
@@ -721,7 +721,7 @@ Since the repository contains no explicit license file, it should not be assumed
 [![Python](https://img.shields.io/badge/python-3.10%E2%80%933.13-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Sürüm](https://img.shields.io/badge/s%C3%BCr%C3%BCm-0.3.0-0A7BBB)](pyproject.toml)
 [![Arayüz](https://img.shields.io/badge/aray%C3%BCz-PySide6-41CD52?logo=qt&logoColor=white)](https://doc.qt.io/qtforpython/)
-[![Lisans](https://img.shields.io/badge/lisans-belirtilmemi%C5%9F-lightgrey)](#atıf-veri-ve-lisans)
+[![Lisans](https://img.shields.io/badge/lisans-MIT%2FApache--2.0-green)](#atıf-veri-ve-lisans)
 
 [English](#english) · **Türkçe**
 
@@ -1426,4 +1426,4 @@ Bu depoda henüz `CITATION.cff`, DOI veya yazarlar tarafından onaylanmış bir 
 
 Harici DEM dosyaları depoya dahil değildir. Kullanılan veri kümesinin lisansı, üreticisi, tarihçesi, koordinat referans sistemi ve ön işleme adımları ilgili yayında ayrıca belirtilmelidir.
 
-Depoda açık bir lisans dosyası bulunmadığından, kodun yeniden kullanımı veya dağıtımı için otomatik olarak izin verildiği varsayılmamalıdır. Yayınlamadan önce uygun bir `LICENSE` dosyasının proje sahipleri tarafından eklenmesi önerilir.
+Bu proje **MIT Lisansı** ve **Apache Lisansı 2.0** altında çift lisanslanmıştır. Bu kodu kullanırken, değiştirirken veya dağıtırken iki lisanstan birini seçebilirsiniz. Tüm lisans koşulları için [LICENSE](LICENSE) dosyasına bakınız.
